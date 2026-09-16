@@ -1,21 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-
-/**
- * Advertise the real package version to MCP clients. Read at startup from
- * package.json so a release bump cannot silently drift from what we report.
- */
-const PACKAGE_VERSION: string = (() => {
-  try {
-    const require = createRequire(import.meta.url);
-    return JSON.parse(readFileSync(require.resolve('../package.json'), 'utf8')).version as string;
-  } catch {
-    return '0.0.0';
-  }
-})();
+import { PACKAGE_VERSION } from './version.js';
 import { loadConfig, redactedContext } from './config.js';
 import { resolveContext, validateRecipients } from './context.js';
 import { sendEnvelope } from './discord.js';

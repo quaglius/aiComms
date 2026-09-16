@@ -22,9 +22,11 @@ import {
   checkBotPermissions,
   getBotUser,
   getChannel,
+  isChannelPubliclyReadable,
   REQUIRED_PERMISSION_BITS,
 } from './discord.js';
 import { REPO_COMMS_FILENAME } from './paths.js';
+import { PACKAGE_VERSION } from './version.js';
 import { prompt, promptSecret } from './prompt.js';
 import {
   getEffectiveToken,
@@ -70,6 +72,33 @@ async function runInit(): Promise<void> {
   console.log('Then run "ai-comms link" in each repo and "ai-comms doctor" to verify.');
 }
 
+/**
+ * Write `.mcp.json` pinned to the running version.
+ *
+ * This file is committed, and every teammate's agent runs whatever it names on
+ * session start. An unpinned `npx @quaglius/ai-comms` would pull the newest
+ * release onto every machine in the team the moment it is published — so a
+ * compromised or simply broken publish reaches everyone with no review. Pinning
+ * makes the upgrade an explicit commit somebody can look at.
+ */
+function writeMcpConfig(cwd: string): void {
+  const target = path.join(cwd, '.mcp.json');
+  if (existsSync(target)) {
+    console.log(`${target} already exists — left untouched.`);
+    return;
+  }
+  const config = {
+    mcpServers: {
+      'ai-comms': {
+        command: 'npx',
+        args: ['-y', `@quaglius/ai-comms@${PACKAGE_VERSION}`, 'mcp'],
+      },
+    },
+  };
+  writeFileSync(target, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  console.log(`Created ${target} (pinned to ${PACKAGE_VERSION})`);
+}
+
 async function runLink(options: { noInstructions?: boolean } = {}): Promise<void> {
   const config = loadConfig();
   const cwd = process.cwd();
@@ -102,7 +131,10 @@ async function runLink(options: { noInstructions?: boolean } = {}): Promise<void
 
   writeFileSync(target, JSON.stringify(repoComms, null, 2) + '\n', 'utf8');
   console.log(`Created ${target}`);
-  console.log('Commit this file so your team can use it with "ai-comms join".');
+
+  writeMcpConfig(cwd);
+
+  console.log('Commit both files so your team can use them with "ai-comms join".');
 
   if (options.noInstructions) return;
 
@@ -257,6 +289,18 @@ async function runDoctor(projectOverride?: string): Promise<number> {
         'Re-invite the bot with permissions=68608 or adjust channel overwrites.',
       );
       return 1;
+    }
+
+    const privacy = await isChannelPubliclyReadable(ctx.channelId, tokenInfo.token);
+    if (privacy.public) {
+      console.log(
+        `Privacy: everyone on the server can read this channel — ${privacy.reason}.\n` +
+          '  The bus carries what your team is building, which files are reserved, and with\n' +
+          '  auto-answer on, excerpts of your code. Deny VIEW_CHANNEL for @everyone and allow\n' +
+          '  only your team and the bot, unless the whole server is your team.',
+      );
+    } else {
+      console.log('Privacy: channel is not readable by @everyone ✓');
     }
     console.log('Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
 

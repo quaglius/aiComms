@@ -273,6 +273,52 @@ export function computeEffectivePermissions(
   return perms;
 }
 
+const VIEW_CHANNEL_BIT = 1024n;
+
+/**
+ * Whether everyone on the server can read the bus.
+ *
+ * The channel carries what your team is building, which files are reserved and
+ * — with auto-answer on — verbatim excerpts of your code. A channel with no
+ * overwrite for @everyone inherits the server default, so it is only as private
+ * as the server; that is easy to leave by accident and invisible until someone
+ * new joins. The @everyone role always shares the guild's id.
+ */
+export async function isChannelPubliclyReadable(
+  channelId: string,
+  token: string,
+): Promise<{ public: boolean; reason: string }> {
+  const response = await discordFetch(`${DISCORD_API}/channels/${channelId}`, token, {
+    method: 'GET',
+  });
+  if (!response.ok) {
+    return { public: false, reason: 'channel not readable, cannot assess' };
+  }
+
+  const channel = (await response.json()) as {
+    guild_id?: string;
+    permission_overwrites?: { id: string; type: number; deny: string }[];
+  };
+  if (!channel.guild_id) {
+    return { public: false, reason: 'not a guild channel' };
+  }
+
+  const everyone = (channel.permission_overwrites ?? []).find(
+    (o) => o.id === channel.guild_id && o.type === 0,
+  );
+  if (!everyone) {
+    return {
+      public: true,
+      reason: 'no @everyone overwrite: the channel inherits the server default',
+    };
+  }
+
+  const deniesView = (BigInt(everyone.deny) & VIEW_CHANNEL_BIT) === VIEW_CHANNEL_BIT;
+  return deniesView
+    ? { public: false, reason: '@everyone is denied VIEW_CHANNEL' }
+    : { public: true, reason: '@everyone is not denied VIEW_CHANNEL' };
+}
+
 export async function checkBotPermissions(
   channelId: string,
   token: string,
