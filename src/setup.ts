@@ -78,6 +78,22 @@ export async function createBusIssue(
   return data.number;
 }
 
+/**
+ * Compare two filesystem paths for identity.
+ *
+ * Raw string comparison duplicated entries whenever the same directory was
+ * written once with forward slashes and once with backslashes — which is what
+ * happens when a config is hand-edited on Windows and later rewritten by
+ * path.resolve. Windows is also case-insensitive.
+ */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const resolved = path.resolve(p).replace(/[\/]+$/, '');
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return norm(a) === norm(b);
+}
+
 function writeMcpConfig(cwd: string): void {
   const target = path.join(cwd, '.mcp.json');
   if (existsSync(target)) {
@@ -113,7 +129,14 @@ function writeRepoComms(
   console.log(`Created ${target}`);
 }
 
-function ensureUserConfig(cwd: string, project: string, agent: string, issue: number, ownerRepo: string): void {
+function ensureUserConfig(
+  cwd: string,
+  project: string,
+  repo: string,
+  agent: string,
+  issue: number,
+  ownerRepo: string,
+): void {
   const configPath = getConfigPath();
   let config: ConfigV2;
 
@@ -134,8 +157,8 @@ function ensureUserConfig(cwd: string, project: string, agent: string, issue: nu
   const absPath = path.resolve(cwd);
   const existing = config.projects[project] ?? {};
   const repos = existing.repos ?? [];
-  const filtered = repos.filter((r) => r.path !== absPath);
-  filtered.push({ name: project, path: absPath });
+  const filtered = repos.filter((r) => !samePath(r.path, absPath));
+  filtered.push({ name: repo, path: absPath });
 
   config.projects[project] = {
     ...existing,
@@ -219,17 +242,72 @@ WantedBy=default.target
   console.log(`Created ${servicePath} — run: systemctl --user enable --now ai-comms-daemon.service`);
 }
 
-export async function runSetup(options: { skipDaemonOffer?: boolean } = {}): Promise<void> {
+/** Every repo already registered for this project, so the instructions block
+ *  can name the ones the agent might need to ask about. */
+function projectRepoNames(project: string, currentRepo: string): string[] {
+  try {
+    const config = loadConfig();
+    const names = (config.projects[project]?.repos ?? []).map((r) => r.name);
+    return [...new Set([currentRepo, ...names])];
+  } catch {
+    return [currentRepo];
+  }
+}
+
+/** The team is whoever can reach the bus repo — never a list kept by hand. */
+async function teamForBus(ownerRepo: string): Promise<string[]> {
+  try {
+    const [owner, repo] = ownerRepo.split('/');
+    const response = await githubFetch(
+      `/repos/${owner}/${repo}/collaborators?per_page=100`,
+      { method: 'GET' },
+    );
+    if (!response.ok) return [];
+    const users = (await response.json()) as Array<{ login: string }>;
+    return users.map((u) => u.login);
+  } catch {
+    return [];
+  }
+}
+
+export interface SetupOptions {
+  skipDaemonOffer?: boolean;
+  /** Join an existing project instead of deriving one from the repo name. */
+  project?: string;
+  /** Join an existing bus, as "owner/repo#issue". Required for the second and
+   *  later repos of a project: without it each repo would create its own bus
+   *  and the team would end up talking past each other on separate channels. */
+  bus?: string;
+}
+
+/** Parse "owner/repo#123" into its parts. */
+export function parseBusRef(ref: string): { fullName: string; issue: number } {
+  const match = /^([^/\s]+\/[^#\s]+)#(\d+)$/.exec(ref.trim());
+  if (!match) {
+    throw new Error(`Invalid --bus "${ref}". Expected owner/repo#issue, e.g. acme/api#42.`);
+  }
+  return { fullName: match[1]!, issue: Number(match[2]) };
+}
+
+export async function runSetup(options: SetupOptions = {}): Promise<void> {
   const cwd = process.cwd();
   const remote = getGitRemote(cwd);
   const repo = repoBasename(cwd);
-  const project = repo;
+  const project = options.project ?? repo;
   const agent = detectAgent();
 
   getGitHubToken();
 
   const repoCommsPath = path.join(cwd, REPO_COMMS_FILENAME);
   let issue: number | null = null;
+  let busFullName = remote.fullName;
+
+  if (options.bus) {
+    const ref = parseBusRef(options.bus);
+    busFullName = ref.fullName;
+    issue = ref.issue;
+    console.log(`Joining existing bus: ${busFullName}#${issue}`);
+  }
 
   if (existsSync(repoCommsPath)) {
     try {
@@ -260,14 +338,15 @@ export async function runSetup(options: { skipDaemonOffer?: boolean } = {}): Pro
     }
   }
 
-  writeRepoComms(cwd, project, repo, remote.fullName, issue);
-  ensureUserConfig(cwd, project, agent, issue, remote.fullName);
+  writeRepoComms(cwd, project, repo, busFullName, issue);
+  ensureUserConfig(cwd, project, repo, agent, issue, busFullName);
   writeMcpConfig(cwd);
 
   const block = buildInstructionsBlock({
     project,
-    repos: [repo],
-    team: [],
+    repo,
+    repos: projectRepoNames(project, repo),
+    team: await teamForBus(busFullName),
   });
   const written = writeInstructionsToRepo(cwd, block);
   for (const file of written) {

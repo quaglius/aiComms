@@ -371,8 +371,10 @@ program
 program
   .command('setup')
   .description('Configure this repo for GitHub bus (no required prompts)')
-  .action(async () => {
-    await runSetup();
+  .option('--project <name>', 'Join an existing project instead of using the repo name')
+  .option('--bus <owner/repo#issue>', 'Join an existing bus instead of creating one')
+  .action(async (opts: { project?: string; bus?: string }) => {
+    await runSetup({ project: opts.project, bus: opts.bus });
     const code = await runDoctor();
     process.exitCode = code;
   });

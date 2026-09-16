@@ -6,21 +6,32 @@ export const INSTRUCTIONS_END = '<!-- ai-comms:end -->';
 
 export interface InstructionsContext {
   project: string;
+  /** The repo this block is being written into, excluded from the "others" list. */
+  repo?: string;
   repos: string[];
   team: string[];
 }
 
 export function buildInstructionsBlock(ctx: InstructionsContext): string {
-  const repoList =
-    ctx.repos.length > 0 ? ctx.repos.join(', ') : '(repos linked via ai-comms link)';
-  const teamList =
-    ctx.team.length > 0 ? ctx.team.join(', ') : '(team roster in .ai-comms.json)';
+  // The point of this line is to tell the agent that *other* repos exist, so it
+  // knows there is somebody to ask. Listing only the current repo, or a
+  // placeholder pointing at a file that no longer holds the roster, says the
+  // opposite and the agent never reaches for the bus.
+  const others = ctx.repos.filter((r) => r !== ctx.repo);
+  const repoLine =
+    others.length > 0
+      ? `Other repos in this project: ${others.join(', ')}.`
+      : 'Other repos join this project as their developers run `ai-comms setup`.';
+  const teamLine =
+    ctx.team.length > 0
+      ? `Teammates: ${ctx.team.join(', ')}.`
+      : 'Your teammates are the people with access to the bus repo.';
 
   return [
     INSTRUCTIONS_START,
     '## ai-comms bus',
     '',
-    `This repo is part of project **${ctx.project}** with multiple repos and developers (${teamList}), each with their own AI agent. Project repos: ${repoList}.`,
+    `This repo is part of project **${ctx.project}**, worked on by several developers who each use their own AI agent. ${repoLine} ${teamLine}`,
     '',
     'Before guessing or asking the user about something that belongs to another repo in this project — API response shape, why a decision was made, whether something is already implemented on the other side — use `bus_ask`.',
     '',
