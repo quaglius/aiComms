@@ -108,6 +108,27 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
   }
 }
 
+/** At most one auto-answer failure notification per hour, so a broken CLI
+ * session cannot turn into a stream of toasts. */
+const AUTO_ANSWER_FAILURE_NOTICE_MS = 60 * 60 * 1000;
+let lastAutoAnswerFailureNotice = 0;
+
+function notifyAutoAnswerFailure(message: string): void {
+  const now = Date.now();
+  if (now - lastAutoAnswerFailureNotice < AUTO_ANSWER_FAILURE_NOTICE_MS) return;
+  lastAutoAnswerFailureNotice = now;
+  try {
+    notifier.notify({
+      title: 'ai-comms · auto-answer failed',
+      message: `${message.slice(0, 160)} — your teammate got no reply. Check that your agent CLI is still signed in.`,
+      sound: false,
+      wait: false,
+    });
+  } catch {
+    // ignore
+  }
+}
+
 function processMessage(
   message: Message,
   project: string,
@@ -140,6 +161,12 @@ export function ingestEnvelope(
   if (config) {
     void runAutoAnswer(envelope, project, config, (message) => {
       daemonLog(project, message, verbose);
+      // A failing answerer is silent by nature: the teammate just never hears
+      // back. The usual cause is an expired CLI session, which can sit broken
+      // for days. Surface it once so the human can re-authenticate.
+      if (/auto-answer (failed|produced no answer)/.test(message)) {
+        notifyAutoAnswerFailure(message);
+      }
     });
   }
 

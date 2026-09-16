@@ -97,6 +97,9 @@ export function gatherBusContext(log: Envelope[], limit = 10): string {
     .join('\n');
 }
 
+/** Envelope bodies are capped at 600 chars; leave room so the answer is not cut. */
+const ANSWER_BUDGET_CHARS = 500;
+
 export function buildAutoAnswerPrompt(envelope: Envelope, log: Envelope[]): string {
   const busContext = gatherBusContext(log);
   return [
@@ -116,6 +119,10 @@ export function buildAutoAnswerPrompt(envelope: Envelope, log: Envelope[]): stri
     '',
     'In your answer, cite the current git branch and commit, and state explicitly whether the working tree is dirty.',
     'If you do not know, say "I don\'t know" — do not invent.',
+    '',
+    `Answer in under ${ANSWER_BUDGET_CHARS} characters. The bus envelope is capped and anything longer is cut off mid-sentence, losing exactly the file and symbol references that make the answer useful.`,
+    'Start with the answer. No preamble, no restating the question, no narrating what you are about to do.',
+    'Point at files, symbols and line numbers instead of explaining at length — the asker can read the code.',
   ].join('\n');
 }
 
@@ -219,14 +226,19 @@ export async function runAutoAnswer(
     return;
   }
 
+  // `repo` identifies a repo, so falling back to the dev's own name is
+  // meaningless. When repoPath spans several repos nothing matches, and naming
+  // the project is the honest answer.
   const answerRepo =
-    projectConfig?.repos?.find((r) => r.path === repoPath)?.name ?? config.identity.dev;
+    projectConfig?.repos?.find((r) => r.path === repoPath)?.name ?? project;
 
   const answer = createEnvelope(
     {
       type: 'answer',
       subject: `re: ${envelope.subject}`.slice(0, 120),
-      body: text.slice(0, 600),
+      // Mark the cut: a silently truncated answer reads as a complete one, and
+      // the asker acts on half an answer without knowing the rest existed.
+      body: text.length > 600 ? text.slice(0, 585) + ' […cut]' : text,
       to: [envelope.from.dev],
       reply_to: envelope.id,
     },
