@@ -232,7 +232,7 @@ describe('claims materialization', () => {
       'ana',
       'acme',
       [own],
-      now,
+      { now },
     );
     assert.equal(ownOnly.length, 0);
 
@@ -251,7 +251,7 @@ describe('claims materialization', () => {
       'ana',
       'acme',
       [own, other],
-      now,
+      { now },
     );
     assert.equal(conflicts.length, 1);
     assert.equal(conflicts[0]!.dev, 'beto');
@@ -274,7 +274,7 @@ describe('claims materialization', () => {
       'ana',
       'acme-api',
       [inCore],
-      now,
+      { now },
     );
     assert.equal(sameRepo.length, 1);
     assert.equal(sameRepo[0]!.repo, 'acme-api');
@@ -284,7 +284,7 @@ describe('claims materialization', () => {
       'ana',
       'acme-web',
       [inCore],
-      now,
+      { now },
     );
     assert.equal(otherRepo.length, 0);
   });

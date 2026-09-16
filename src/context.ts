@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { ConfigError, type ConfigV2, loadConfig } from './config.js';
+import type { Envelope } from './envelope.js';
 import { REPO_COMMS_FILENAME } from './paths.js';
 
 export const RepoCommsSchema = z
@@ -188,16 +189,26 @@ export function contextResolutionError(): string {
   );
 }
 
-export function validateRecipient(
+export function validateRecipients(
   to: string[],
   team: string[],
   dev: string,
-): string | null {
+  options: { log?: Envelope[]; replyTo?: string | null } = {},
+): string[] {
+  const warnings: string[] = [];
+  const replyAuthor =
+    options.replyTo && options.log
+      ? options.log.find((e) => e.id === options.replyTo)?.from.dev
+      : undefined;
+
   for (const recipient of to) {
     if (recipient === '*' || recipient === dev) continue;
+    if (replyAuthor && recipient === replyAuthor) continue;
     if (team.length > 0 && !team.includes(recipient)) {
-      return `recipient "${recipient}" is not in team: ${team.join(', ')}`;
+      warnings.push(
+        `recipient "${recipient}" is not in team roster (${team.join(', ')}); sending directed anyway`,
+      );
     }
   }
-  return null;
+  return warnings;
 }

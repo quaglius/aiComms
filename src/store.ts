@@ -22,6 +22,7 @@ import {
   isExpired,
   isHopsBlocked,
 } from './envelope.js';
+import { formatDuration, formatRemaining, overlapRemainingMs } from './time.js';
 
 export interface CursorState {
   lastMessageId: string;
@@ -48,6 +49,7 @@ export interface ClaimConflict {
   repo: string;
   paths: string[];
   until: string;
+  overlapRemaining: string;
 }
 
 function ensureProjectDir(project: string): void {
@@ -196,8 +198,10 @@ export function findClaimConflicts(
   dev: string,
   repo: string,
   envelopes: Envelope[],
-  now = new Date(),
+  options: { now?: Date; newUntil?: string } = {},
 ): ClaimConflict[] {
+  const now = options.now ?? new Date();
+  const newUntil = options.newUntil;
   const active = materializeActiveClaims(envelopes, now);
   const conflicts: ClaimConflict[] = [];
 
@@ -205,6 +209,10 @@ export function findClaimConflicts(
     if (claim.dev === dev) continue;
     if (claim.repo !== repo) continue;
     if (globsOverlap(paths, claim.paths)) {
+      const overlapMs =
+        newUntil != null
+          ? overlapRemainingMs(newUntil, claim.until, now)
+          : overlapRemainingMs(claim.until, claim.until, now);
       conflicts.push({
         claimId: claim.id,
         dev: claim.dev,
@@ -212,11 +220,55 @@ export function findClaimConflicts(
         repo: claim.repo,
         paths: claim.paths,
         until: claim.until,
+        overlapRemaining: formatDuration(overlapMs),
       });
     }
   }
 
   return conflicts;
+}
+
+export function formatActiveClaim(claim: ActiveClaim, now = new Date()): string {
+  const remaining = formatRemaining(claim.until, now);
+  return `${claim.id} · ${claim.dev}/${claim.agent} · ${claim.repo} · active ${remaining} · paths=${claim.paths.join(', ')} · ${claim.subject}`;
+}
+
+export function formatClaimConflict(conflict: ClaimConflict): string {
+  return (
+    `- ${conflict.claimId} (${conflict.dev}/${conflict.agent} · ${conflict.repo}) ` +
+    `paths=${conflict.paths.join(', ')} — both active now, overlap ${conflict.overlapRemaining}`
+  );
+}
+
+function releasesByClaimId(envelopes: Envelope[]): Map<string, Envelope> {
+  const map = new Map<string, Envelope>();
+  for (const env of envelopes) {
+    if (env.type === 'release' && env.reply_to) {
+      map.set(env.reply_to, env);
+    }
+  }
+  return map;
+}
+
+export function formatInboxForDisplay(inbox: Envelope[], log: Envelope[]): string {
+  if (inbox.length === 0) return '(empty)';
+
+  const releases = releasesByClaimId(log);
+
+  return inbox
+    .map((env) => {
+      const lines: string[] = [];
+      if (env.type === 'claim' && releases.has(env.id)) {
+        const release = releases.get(env.id)!;
+        lines.push(`[released — see release ${release.id} @ ${release.ts}]`);
+      }
+      if (env.type === 'release' && env.reply_to) {
+        lines.push(`[releases claim ${env.reply_to}]`);
+      }
+      lines.push(JSON.stringify(env, null, 2));
+      return lines.join('\n');
+    })
+    .join('\n\n');
 }
 
 export function materializeInbox(

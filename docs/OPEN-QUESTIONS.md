@@ -23,8 +23,12 @@ Conservative interpretations applied. They do not change the envelope schema.
 
 **Protocol/spec:** daemon step 3 — `from.dev === config.dev`.
 
-**Interpretation:** do not re-persist or notify (MCP send already appends to the log).
-Do advance `cursor.json` so the message is not reprocessed.
+**Interpretation:** skip desktop notification only. Every valid envelope is
+persisted to `log.jsonl` regardless of author — the log reconstructs the full
+channel, and filtering by author breaks that invariant (e.g. own claims vanish
+after a cold start). MCP `bus_send` also appends locally; the daemon must not
+drop duplicates on ingest. Always advance `cursor.json` so the message is not
+reprocessed.
 
 ## 2. Notification sound
 

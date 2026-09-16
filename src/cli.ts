@@ -32,6 +32,8 @@ import {
   tokenSourceLabel,
 } from './secrets.js';
 import {
+  formatActiveClaim,
+  formatInboxForDisplay,
   loadLog,
   loadReadState,
   materializeActiveClaims,
@@ -261,10 +263,10 @@ async function runInbox(all: boolean, projectOverride?: string): Promise<void> {
     return;
   }
 
-  for (const env of inbox) {
+  const formatted = formatInboxForDisplay(inbox, log);
+  for (const block of formatted.split('\n\n')) {
     console.log('---');
-    console.log(`${env.type} · ${env.from.dev}/${env.from.agent} · ${env.subject}`);
-    console.log(JSON.stringify(env, null, 2));
+    console.log(block);
   }
 
   markRead(ctx.project, inbox.map((e) => e.id));
@@ -283,9 +285,7 @@ async function runClaims(projectOverride?: string): Promise<void> {
   }
 
   for (const c of claims) {
-    console.log(
-      `${c.id} · ${c.dev}/${c.agent} · ${c.repo} · until=${c.until} · paths=${c.paths.join(', ')} · ${c.subject}`,
-    );
+    console.log(formatActiveClaim(c));
   }
 }
 

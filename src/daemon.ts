@@ -119,13 +119,24 @@ function processMessage(
 
   saveCursor(project, { lastMessageId: message.id });
 
-  if (envelope.from.dev === dev) return;
+  ingestEnvelope(envelope, project, dev);
+}
 
+/** Persist every valid envelope; notify only for messages from other devs. */
+export function ingestEnvelope(
+  envelope: Envelope,
+  project: string,
+  dev: string,
+): { notified: boolean } {
   appendEnvelope(envelope, project);
+
+  if (envelope.from.dev === dev) return { notified: false };
 
   if (shouldNotify(envelope, dev)) {
     notifyEnvelope(envelope, dev);
+    return { notified: true };
   }
+  return { notified: false };
 }
 
 /** Discord's hard per-request cap on `limit` for channel message fetches. */
