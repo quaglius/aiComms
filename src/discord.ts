@@ -3,6 +3,23 @@ import { renderEnvelope } from './envelope.js';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
+export const REQUIRED_PERMISSIONS = {
+  VIEW_CHANNEL: 1n << 10n,
+  SEND_MESSAGES: 1n << 11n,
+  READ_MESSAGE_HISTORY: 1n << 16n,
+} as const;
+
+export const REQUIRED_PERMISSION_BITS =
+  REQUIRED_PERMISSIONS.VIEW_CHANNEL |
+  REQUIRED_PERMISSIONS.SEND_MESSAGES |
+  REQUIRED_PERMISSIONS.READ_MESSAGE_HISTORY;
+
+export const PERMISSION_NAMES: Record<string, bigint> = {
+  VIEW_CHANNEL: REQUIRED_PERMISSIONS.VIEW_CHANNEL,
+  SEND_MESSAGES: REQUIRED_PERMISSIONS.SEND_MESSAGES,
+  READ_MESSAGE_HISTORY: REQUIRED_PERMISSIONS.READ_MESSAGE_HISTORY,
+};
+
 export interface DiscordMessage {
   id: string;
   content: string;
@@ -37,7 +54,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function discordFetch(
+export async function discordFetch(
   url: string,
   token: string,
   init: RequestInit,
@@ -126,7 +143,7 @@ export async function fetchMessagesAfter(
     if (batch.length < batchLimit) break;
   }
 
-  return collected.sort((a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1);
+  return collected.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
 }
 
 export async function fetchRecentMessages(
@@ -162,7 +179,7 @@ export async function fetchRecentMessages(
     if (batch.length < batchLimit) break;
   }
 
-  return collected.sort((a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1);
+  return collected.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
 }
 
 export async function getBotUser(token: string): Promise<{ id: string; username: string }> {
@@ -176,7 +193,13 @@ export async function getBotUser(token: string): Promise<{ id: string; username:
 export async function getChannel(
   channelId: string,
   token: string,
-): Promise<{ id: string; name?: string; type: number }> {
+): Promise<{
+  id: string;
+  name?: string;
+  type: number;
+  guild_id?: string;
+  permission_overwrites?: PermissionOverwrite[];
+}> {
   const response = await discordFetch(
     `${DISCORD_API}/channels/${channelId}`,
     token,
@@ -185,23 +208,76 @@ export async function getChannel(
   if (!response.ok) {
     throw new DiscordApiError('Canal inaccesible o ID inválido', response.status);
   }
-  return (await response.json()) as { id: string; name?: string; type: number };
+  return (await response.json()) as {
+    id: string;
+    name?: string;
+    type: number;
+    guild_id?: string;
+    permission_overwrites?: PermissionOverwrite[];
+  };
+}
+
+interface PermissionOverwrite {
+  id: string;
+  type: number;
+  allow: string;
+  deny: string;
+}
+
+interface GuildRole {
+  id: string;
+  permissions: string;
+  position: number;
+}
+
+export function computeEffectivePermissions(
+  guildId: string,
+  everyonePermissions: bigint,
+  memberRoleIds: string[],
+  roles: GuildRole[],
+  overwrites: PermissionOverwrite[],
+  memberId: string,
+): bigint {
+  const roleMap = new Map(roles.map((r) => [r.id, r]));
+  const memberRoles = memberRoleIds
+    .map((id) => roleMap.get(id))
+    .filter((r): r is GuildRole => Boolean(r))
+    .sort((a, b) => b.position - a.position);
+
+  let perms = everyonePermissions;
+  for (const role of memberRoles) {
+    perms |= BigInt(role.permissions || '0');
+  }
+
+  if ((perms & (1n << 3n)) !== 0n) {
+    return (1n << 31n) - 1n;
+  }
+
+  const applyOverwrite = (overwrite: PermissionOverwrite): void => {
+    const allow = BigInt(overwrite.allow || '0');
+    const deny = BigInt(overwrite.deny || '0');
+    perms = (perms & ~deny) | allow;
+  };
+
+  const everyoneOverwrite = overwrites.find((o) => o.type === 0 && o.id === guildId);
+  if (everyoneOverwrite) applyOverwrite(everyoneOverwrite);
+
+  for (const role of memberRoles) {
+    const ow = overwrites.find((o) => o.type === 0 && o.id === role.id);
+    if (ow) applyOverwrite(ow);
+  }
+
+  const memberOverwrite = overwrites.find((o) => o.type === 1 && o.id === memberId);
+  if (memberOverwrite) applyOverwrite(memberOverwrite);
+
+  return perms;
 }
 
 export async function checkBotPermissions(
   channelId: string,
   token: string,
 ): Promise<{ ok: boolean; missing: string[] }> {
-  const response = await discordFetch(
-    `${DISCORD_API}/channels/${channelId}`,
-    token,
-    { method: 'GET' },
-  );
-  if (!response.ok) {
-    return { ok: false, missing: ['VIEW_CHANNEL'] };
-  }
-
-  const channel = (await response.json()) as { guild_id?: string };
+  const channel = await getChannel(channelId, token);
   if (!channel.guild_id) {
     return { ok: true, missing: [] };
   }
@@ -216,5 +292,36 @@ export async function checkBotPermissions(
     return { ok: false, missing: ['guild membership'] };
   }
 
-  return { ok: true, missing: [] };
+  const member = (await memberResp.json()) as { roles: string[] };
+
+  const guildResp = await discordFetch(
+    `${DISCORD_API}/guilds/${channel.guild_id}`,
+    token,
+    { method: 'GET' },
+  );
+  if (!guildResp.ok) {
+    return { ok: false, missing: ['guild access'] };
+  }
+
+  const guild = (await guildResp.json()) as { id: string; roles: GuildRole[] };
+  const everyoneRole = guild.roles.find((r) => r.id === guild.id);
+  const everyonePerms = BigInt(everyoneRole?.permissions || '0');
+
+  const effective = computeEffectivePermissions(
+    guild.id,
+    everyonePerms,
+    member.roles,
+    guild.roles,
+    channel.permission_overwrites ?? [],
+    bot.id,
+  );
+
+  const missing: string[] = [];
+  for (const [name, bit] of Object.entries(PERMISSION_NAMES)) {
+    if ((effective & bit) === 0n) {
+      missing.push(name);
+    }
+  }
+
+  return { ok: missing.length === 0, missing };
 }

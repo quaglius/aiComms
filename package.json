@@ -1,7 +1,7 @@
 {
-  "name": "ai-comms",
+  "name": "@quaglius/ai-comms",
   "version": "0.1.0",
-  "description": "Canal de coordinación entre agentes de IA del equipo",
+  "description": "A coordination bus that lets each developer AI agent on a team talk to the others over a shared Discord channel.",
   "type": "module",
   "bin": {
     "ai-comms": "./bin/ai-comms.js"
@@ -12,7 +12,7 @@
     "test": "tsx --test test/**/*.test.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -27,5 +27,35 @@
     "@types/node-notifier": "^8.0.5",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quaglius/aiComms.git"
+  },
+  "homepage": "https://github.com/quaglius/aiComms#readme",
+  "bugs": {
+    "url": "https://github.com/quaglius/aiComms/issues"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "discord",
+    "claude-code",
+    "cursor",
+    "multi-agent",
+    "coordination"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills",
+    "docs",
+    ".claude-plugin",
+    "README.md",
+    "LICENSE"
+  ]
 }

@@ -1,3 +1,20 @@
+# Preguntas abiertas
+
+## v1
+
+### Proyecto sin repos en `projects` y sin `.ai-comms.json`
+
+Si el cwd no tiene `.ai-comms.json` y `projects[p].repos` está vacío, v1 usa el
+basename del cwd como nombre de repo y el `channelId` del proyecto. Esto permite
+`doctor` y MCP sin `link`, pero es menos explícito. Preferí siempre `link`.
+
+### Daemon con múltiples tokens
+
+Si dos proyectos usan tokens distintos, el daemon abre un cliente gateway por
+token. Si comparten token, un solo cliente escucha todos los canales.
+
+---
+
 # Preguntas abiertas (protocolo v0)
 
 Interpretaciones conservadoras aplicadas. No modifican el schema del sobre.

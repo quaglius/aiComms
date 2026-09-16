@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { getEffectiveToken, loadConfig, redactedConfig } from './config.js';
+import { loadConfig, redactedContext } from './config.js';
+import { resolveContext, validateRecipient } from './context.js';
 import { sendEnvelope } from './discord.js';
 import {
   createEnvelope,
@@ -11,12 +12,15 @@ import {
   validateClaimInput,
   type Envelope,
 } from './envelope.js';
+import { getEffectiveToken, tokenSourceLabel } from './secrets.js';
 import {
   appendEnvelope,
   findClaimConflicts,
+  isAnyDaemonRunning,
   isDaemonRunning,
   isLogStale,
   loadLog,
+  loadReadState,
   materializeActiveClaims,
   materializeInbox,
 } from './store.js';
@@ -35,33 +39,47 @@ function withSecurityPreamble(body: string, hasForeign: boolean): string {
 }
 
 export function createMcpServer(): McpServer {
-  const server = new McpServer({ name: 'ai-comms', version: '0.1.0' });
+  const server = new McpServer({ name: 'ai-comms', version: '1.0.0' });
 
   server.tool(
     'bus_send',
     'Publica un sobre en el bus de Discord',
-    SendInputShape,
+    {
+      ...SendInputShape,
+      project: z.string().optional(),
+    },
     async (args) => {
       const config = loadConfig();
+      const ctx = resolveContext(process.cwd(), config, {
+        projectOverride: args.project,
+      });
+
       const input = SendInputSchema.parse(args);
       const claimError = validateClaimInput(input);
       if (claimError) {
         return { content: [{ type: 'text' as const, text: `Error: ${claimError}` }] };
       }
 
+      if (input.to) {
+        const recipientError = validateRecipient(input.to, ctx.team, ctx.dev);
+        if (recipientError) {
+          return { content: [{ type: 'text' as const, text: `Error: ${recipientError}` }] };
+        }
+      }
+
       const envelope = createEnvelope(input, {
-        dev: config.dev,
-        agent: config.agent,
-        repo: config.repo,
+        dev: ctx.dev,
+        agent: ctx.agent,
+        repo: ctx.repo,
       });
 
-      const log = loadLog();
+      const log = loadLog(ctx.project);
       let conflictsText = '';
       if (input.type === 'claim' && input.refs?.paths) {
         const conflicts = findClaimConflicts(
           input.refs.paths,
-          config.dev,
-          config.repo,
+          ctx.dev,
+          ctx.repo,
           log,
         );
         if (conflicts.length) {
@@ -76,22 +94,22 @@ export function createMcpServer(): McpServer {
         }
       }
 
-      const token = getEffectiveToken(config);
+      const { token } = getEffectiveToken(ctx.project);
       try {
-        await sendEnvelope(envelope, config.discord.channelId, token);
+        await sendEnvelope(envelope, ctx.channelId, token);
       } catch (err) {
         if (err instanceof EnvelopeTooLargeError) {
           return { content: [{ type: 'text' as const, text: `Error: ${err.message}` }] };
         }
         throw err;
       }
-      appendEnvelope(envelope);
+      appendEnvelope(envelope, ctx.project);
 
       return {
         content: [
           {
             type: 'text' as const,
-            text: `Publicado: ${envelope.id}${conflictsText}`,
+            text: `Publicado: ${envelope.id} (repo=${ctx.repo})${conflictsText}`,
           },
         ],
       };
@@ -104,22 +122,29 @@ export function createMcpServer(): McpServer {
     {
       since: z.string().optional(),
       unread_only: z.boolean().optional(),
+      project: z.string().optional(),
     },
     async (args) => {
       const config = loadConfig();
-      const log = loadLog();
-      const inbox = materializeInbox(log, config.dev, {
+      const ctx = resolveContext(process.cwd(), config, {
+        projectOverride: args.project,
+      });
+      const log = loadLog(ctx.project);
+      const readState = loadReadState(ctx.project);
+      const inbox = materializeInbox(log, ctx.dev, {
         since: args.since,
         unreadOnly: args.unread_only,
+        readState,
       });
 
       let staleWarning = '';
-      if (isLogStale() && !isDaemonRunning()) {
+      const projects = Object.keys(config.projects ?? {});
+      if (isLogStale(ctx.project) && !isDaemonRunning(ctx.project) && !isAnyDaemonRunning(projects)) {
         staleWarning =
           'Advertencia: el log no se actualizó en más de 5 minutos y el daemon no parece estar corriendo. El inbox puede estar desactualizado.\n\n';
       }
 
-      const hasForeign = inbox.some((e) => e.from.dev !== config.dev);
+      const hasForeign = inbox.some((e) => e.from.dev !== ctx.dev);
       const body = staleWarning + formatEnvelopeList(inbox);
 
       return {
@@ -128,38 +153,52 @@ export function createMcpServer(): McpServer {
     },
   );
 
-  server.tool('bus_claims', 'Claims activos de todo el equipo', {}, async () => {
-    const config = loadConfig();
-    const log = loadLog();
-    const claims = materializeActiveClaims(log);
-    const foreign = claims.filter((c) => c.dev !== config.dev);
+  server.tool(
+    'bus_claims',
+    'Claims activos de todo el equipo',
+    { project: z.string().optional() },
+    async (args) => {
+      const config = loadConfig();
+      const ctx = resolveContext(process.cwd(), config, {
+        projectOverride: args.project,
+      });
+      const log = loadLog(ctx.project);
+      const claims = materializeActiveClaims(log);
+      const foreign = claims.filter((c) => c.dev !== ctx.dev);
 
-    const body =
-      claims.length === 0
-        ? '(sin claims activos)'
-        : claims
-            .map(
-              (c) =>
-                `${c.id} · ${c.dev}/${c.agent} · ${c.repo} · until=${c.until} · paths=${c.paths.join(', ')} · ${c.subject}`,
-            )
-            .join('\n');
+      const body =
+        claims.length === 0
+          ? '(sin claims activos)'
+          : claims
+              .map(
+                (c) =>
+                  `${c.id} · ${c.dev}/${c.agent} · ${c.repo} · until=${c.until} · paths=${c.paths.join(', ')} · ${c.subject}`,
+              )
+              .join('\n');
 
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: withSecurityPreamble(body, foreign.length > 0),
-        },
-      ],
-    };
-  });
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: withSecurityPreamble(body, foreign.length > 0),
+          },
+        ],
+      };
+    },
+  );
 
   server.tool(
     'bus_release',
     'Publica un release para un claim',
-    { claim_id: z.string() },
+    {
+      claim_id: z.string(),
+      project: z.string().optional(),
+    },
     async (args) => {
       const config = loadConfig();
+      const ctx = resolveContext(process.cwd(), config, {
+        projectOverride: args.project,
+      });
       const envelope = createEnvelope(
         {
           type: 'release',
@@ -167,12 +206,12 @@ export function createMcpServer(): McpServer {
           reply_to: args.claim_id,
           to: ['*'],
         },
-        { dev: config.dev, agent: config.agent, repo: config.repo },
+        { dev: ctx.dev, agent: ctx.agent, repo: ctx.repo },
       );
 
-      const token = getEffectiveToken(config);
-      await sendEnvelope(envelope, config.discord.channelId, token);
-      appendEnvelope(envelope);
+      const { token } = getEffectiveToken(ctx.project);
+      await sendEnvelope(envelope, ctx.channelId, token);
+      appendEnvelope(envelope, ctx.project);
 
       return {
         content: [{ type: 'text' as const, text: `Release publicado: ${envelope.id}` }],
@@ -182,9 +221,11 @@ export function createMcpServer(): McpServer {
 
   server.tool('bus_whoami', 'Identidad y config efectiva (sin token)', {}, async () => {
     const config = loadConfig();
+    const ctx = resolveContext(process.cwd(), config);
+    const tokenInfo = getEffectiveToken(ctx.project);
     const effective = {
-      ...redactedConfig(config),
-      tokenSource: process.env.AI_COMMS_TOKEN ? 'AI_COMMS_TOKEN' : 'config file',
+      ...redactedContext(ctx),
+      tokenSource: tokenSourceLabel(tokenInfo.source, ctx.project),
     };
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(effective, null, 2) }],

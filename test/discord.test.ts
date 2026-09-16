@@ -74,12 +74,12 @@ describe('doctor sin config', () => {
       return true;
     }) as typeof process.stderr.write;
 
-    const { ConfigError, CONFIG_PATH } = await import('../src/config.js');
+    const { ConfigError, getConfigPath } = await import('../src/config.js');
 
     try {
       assert.throws(() => {
         throw new ConfigError(
-          `No se encontró config en ${CONFIG_PATH}. Ejecutá "ai-comms init" para crearla.`,
+          `No se encontró config en ${getConfigPath()}. Ejecutá "ai-comms init" para crearla.`,
         );
       });
 

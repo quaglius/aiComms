@@ -6,8 +6,14 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import path from 'node:path';
-import { CONFIG_DIR } from './config.js';
+import {
+  getProjectCursorPath,
+  getProjectDaemonLogPath,
+  getProjectDaemonPidPath,
+  getProjectDir,
+  getProjectLogPath,
+  getProjectReadPath,
+} from './paths.js';
 import {
   type Envelope,
   EnvelopeSchema,
@@ -16,12 +22,6 @@ import {
   isExpired,
   isHopsBlocked,
 } from './envelope.js';
-
-export const LOG_PATH = path.join(CONFIG_DIR, 'log.jsonl');
-export const CURSOR_PATH = path.join(CONFIG_DIR, 'cursor.json');
-export const READ_PATH = path.join(CONFIG_DIR, 'read.json');
-export const DAEMON_LOG_PATH = path.join(CONFIG_DIR, 'daemon.log');
-export const DAEMON_PID_PATH = path.join(CONFIG_DIR, 'daemon.pid');
 
 export interface CursorState {
   lastMessageId: string;
@@ -50,22 +50,24 @@ export interface ClaimConflict {
   until: string;
 }
 
-function ensureDir(): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
+function ensureProjectDir(project: string): void {
+  mkdirSync(getProjectDir(project), { recursive: true });
 }
 
 export function appendEnvelope(
   envelope: Envelope,
-  logPath = LOG_PATH,
+  project: string,
   existing?: Envelope[],
 ): void {
-  const known = existing ?? loadLog(logPath);
+  const logPath = getProjectLogPath(project);
+  const known = existing ?? loadLog(project);
   if (known.some((e) => e.id === envelope.id)) return;
-  ensureDir();
+  ensureProjectDir(project);
   appendFileSync(logPath, JSON.stringify(envelope) + '\n', 'utf8');
 }
 
-export function loadLog(logPath = LOG_PATH): Envelope[] {
+export function loadLog(project: string): Envelope[] {
+  const logPath = getProjectLogPath(project);
   if (!existsSync(logPath)) return [];
   const lines = readFileSync(logPath, 'utf8').split('\n').filter(Boolean);
   const envelopes: Envelope[] = [];
@@ -80,7 +82,8 @@ export function loadLog(logPath = LOG_PATH): Envelope[] {
   return envelopes;
 }
 
-export function loadCursor(cursorPath = CURSOR_PATH): CursorState | null {
+export function loadCursor(project: string): CursorState | null {
+  const cursorPath = getProjectCursorPath(project);
   if (!existsSync(cursorPath)) return null;
   try {
     return JSON.parse(readFileSync(cursorPath, 'utf8')) as CursorState;
@@ -89,12 +92,13 @@ export function loadCursor(cursorPath = CURSOR_PATH): CursorState | null {
   }
 }
 
-export function saveCursor(state: CursorState, cursorPath = CURSOR_PATH): void {
-  ensureDir();
-  writeFileSync(cursorPath, JSON.stringify(state, null, 2) + '\n', 'utf8');
+export function saveCursor(project: string, state: CursorState): void {
+  ensureProjectDir(project);
+  writeFileSync(getProjectCursorPath(project), JSON.stringify(state, null, 2) + '\n', 'utf8');
 }
 
-export function loadReadState(readPath = READ_PATH): ReadState {
+export function loadReadState(project: string): ReadState {
+  const readPath = getProjectReadPath(project);
   if (!existsSync(readPath)) return { ids: [] };
   try {
     const raw = JSON.parse(readFileSync(readPath, 'utf8')) as ReadState;
@@ -104,23 +108,25 @@ export function loadReadState(readPath = READ_PATH): ReadState {
   }
 }
 
-export function saveReadState(state: ReadState, readPath = READ_PATH): void {
-  ensureDir();
-  writeFileSync(readPath, JSON.stringify(state, null, 2) + '\n', 'utf8');
+export function saveReadState(project: string, state: ReadState): void {
+  ensureProjectDir(project);
+  writeFileSync(getProjectReadPath(project), JSON.stringify(state, null, 2) + '\n', 'utf8');
 }
 
-export function markRead(ids: string[], readPath = READ_PATH): void {
-  const state = loadReadState(readPath);
+export function markRead(project: string, ids: string[]): void {
+  const state = loadReadState(project);
   const merged = new Set([...state.ids, ...ids]);
-  saveReadState({ ids: [...merged] }, readPath);
+  saveReadState(project, { ids: [...merged] });
 }
 
-export function getLogLastModified(logPath = LOG_PATH): Date | null {
+export function getLogLastModified(project: string): Date | null {
+  const logPath = getProjectLogPath(project);
   if (!existsSync(logPath)) return null;
   return statSync(logPath).mtime;
 }
 
-export function isDaemonRunning(pidPath = DAEMON_PID_PATH): boolean {
+export function isDaemonRunning(project: string): boolean {
+  const pidPath = getProjectDaemonPidPath(project);
   if (!existsSync(pidPath)) return false;
   try {
     const pid = Number.parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
@@ -132,12 +138,13 @@ export function isDaemonRunning(pidPath = DAEMON_PID_PATH): boolean {
   }
 }
 
-export function writeDaemonPid(pid = process.pid, pidPath = DAEMON_PID_PATH): void {
-  ensureDir();
-  writeFileSync(pidPath, String(pid) + '\n', 'utf8');
+export function writeDaemonPid(project: string, pid = process.pid): void {
+  ensureProjectDir(project);
+  writeFileSync(getProjectDaemonPidPath(project), String(pid) + '\n', 'utf8');
 }
 
-export function removeDaemonPid(pidPath = DAEMON_PID_PATH): void {
+export function removeDaemonPid(project: string): void {
+  const pidPath = getProjectDaemonPidPath(project);
   if (existsSync(pidPath)) {
     try {
       writeFileSync(pidPath, '');
@@ -145,6 +152,10 @@ export function removeDaemonPid(pidPath = DAEMON_PID_PATH): void {
       // ignore
     }
   }
+}
+
+export function getDaemonLogPath(project: string): string {
+  return getProjectDaemonLogPath(project);
 }
 
 export function materializeActiveClaims(
@@ -192,9 +203,6 @@ export function findClaimConflicts(
 
   for (const claim of active) {
     if (claim.dev === dev) continue;
-    // Los globs de un claim son relativos a su repo. Un proyecto puede
-    // abarcar varios repos donde la misma ruta existe en más de uno:
-    // comparar globs entre repos produce conflictos falsos.
     if (claim.repo !== repo) continue;
     if (globsOverlap(paths, claim.paths)) {
       conflicts.push({
@@ -214,11 +222,15 @@ export function findClaimConflicts(
 export function materializeInbox(
   envelopes: Envelope[],
   dev: string,
-  options: { since?: string; unreadOnly?: boolean; now?: Date } = {},
+  options: {
+    since?: string;
+    unreadOnly?: boolean;
+    now?: Date;
+    readState?: ReadState;
+  } = {},
 ): Envelope[] {
   const now = options.now ?? new Date();
-  const read = loadReadState();
-  const readSet = new Set(read.ids);
+  const readSet = new Set((options.readState ?? { ids: [] }).ids);
   const sinceDate = options.since ? new Date(options.since) : null;
 
   return envelopes.filter((env) => {
@@ -233,11 +245,15 @@ export function materializeInbox(
 }
 
 export function isLogStale(
-  logPath = LOG_PATH,
+  project: string,
   staleMs = 5 * 60 * 1000,
   now = Date.now(),
 ): boolean {
-  const mtime = getLogLastModified(logPath);
+  const mtime = getLogLastModified(project);
   if (!mtime) return true;
   return now - mtime.getTime() > staleMs;
+}
+
+export function isAnyDaemonRunning(projects: string[]): boolean {
+  return projects.some((p) => isDaemonRunning(p));
 }
