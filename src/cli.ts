@@ -24,7 +24,7 @@ import {
   getChannel,
   isChannelPubliclyReadable,
   REQUIRED_PERMISSION_BITS,
-} from './discord.js';
+} from './transports/discord-api.js';
 import { REPO_COMMS_FILENAME } from './paths.js';
 import { PACKAGE_VERSION } from './version.js';
 import { prompt, promptSecret } from './prompt.js';
@@ -45,9 +45,13 @@ import {
 } from './store.js';
 import { formatBudgetSnapshot, getBudgetSnapshot } from './budget.js';
 import { buildInstructionsBlock, writeInstructionsToRepo } from './instructions.js';
+import { createTransport } from './transports/index.js';
+import { isDiscordBus, isGitHubBus } from './transports/types.js';
+import { getRepoCollaborators } from './collaborators.js';
+import { runSetup } from './setup.js';
 
 async function runInit(): Promise<void> {
-  console.log('ai-comms initial setup\n');
+  console.log('ai-comms initial setup (legacy Discord)\n');
 
   const dev = await prompt('dev (stable slug, e.g. ana)');
   const agent = await prompt('agent (e.g. claude-code, cursor)');
@@ -57,6 +61,7 @@ async function runInit(): Promise<void> {
   const config = ConfigV2Schema.parse({
     version: 2,
     identity: { dev, agent },
+    agent,
     defaultProject: project,
     projects: {
       [project]: {
@@ -72,15 +77,6 @@ async function runInit(): Promise<void> {
   console.log('Then run "ai-comms link" in each repo and "ai-comms doctor" to verify.');
 }
 
-/**
- * Write `.mcp.json` pinned to the running version.
- *
- * This file is committed, and every teammate's agent runs whatever it names on
- * session start. An unpinned `npx @quaglius/ai-comms` would pull the newest
- * release onto every machine in the team the moment it is published — so a
- * compromised or simply broken publish reaches everyone with no review. Pinning
- * makes the upgrade an explicit commit somebody can look at.
- */
 function writeMcpConfig(cwd: string): void {
   const target = path.join(cwd, '.mcp.json');
   if (existsSync(target)) {
@@ -125,7 +121,7 @@ async function runLink(options: { noInstructions?: boolean } = {}): Promise<void
   const repoComms = RepoCommsSchema.parse({
     project,
     repo,
-    discord: { channelId: projectConfig.discord.channelId },
+    discord: { channelId: projectConfig.discord!.channelId },
     team: [],
   });
 
@@ -134,7 +130,7 @@ async function runLink(options: { noInstructions?: boolean } = {}): Promise<void
 
   writeMcpConfig(cwd);
 
-  console.log('Commit both files so your team can use them with "ai-comms join".');
+  console.log('Commit both files so your team can use them with "ai-comms setup".');
 
   if (options.noInstructions) return;
 
@@ -157,48 +153,6 @@ async function runLink(options: { noInstructions?: boolean } = {}): Promise<void
   for (const file of written) {
     console.log(`Updated ${file}`);
   }
-}
-
-async function runJoin(repoPath: string): Promise<void> {
-  const absPath = path.resolve(repoPath);
-  const repoCommsFile = path.join(absPath, REPO_COMMS_FILENAME);
-
-  if (!existsSync(repoCommsFile)) {
-    console.error(`Could not find ${repoCommsFile}. Did you clone the correct repo?`);
-    process.exit(1);
-  }
-
-  const repoComms = loadRepoComms(repoCommsFile);
-  let config: ReturnType<typeof loadConfig>;
-
-  try {
-    config = loadConfig();
-  } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error(
-        `${err.message}\nRun "ai-comms init" first to configure your identity.`,
-      );
-      process.exit(1);
-    }
-    throw err;
-  }
-
-  const { project } = repoComms;
-  config.projects[project] = {
-    discord: { channelId: repoComms.discord.channelId },
-    repos: [
-      ...(config.projects[project]?.repos ?? []).filter((r) => r.path !== absPath),
-      { name: repoComms.repo, path: absPath },
-    ],
-  };
-
-  if (!config.defaultProject) {
-    config.defaultProject = project;
-  }
-
-  saveConfig(config);
-  console.log(`Project "${project}" registered (repo: ${repoComms.repo}).`);
-  console.log(`Run "ai-comms secret set ${project}" then "ai-comms doctor".`);
 }
 
 async function runSecretSet(project: string): Promise<void> {
@@ -238,71 +192,93 @@ async function runDoctor(projectOverride?: string): Promise<number> {
       return 1;
     }
 
+    const transport = createTransport(ctx, config);
+    const identity = await transport.whoami();
+
     console.log('ai-comms doctor\n');
     console.log('Identity:');
-    console.log(`  dev:     ${ctx.dev}`);
+    console.log(`  dev:     ${identity.dev}${identity.authenticated ? '' : ' (not authenticated)'}`);
     console.log(`  agent:   ${ctx.agent}`);
     console.log(`  project: ${ctx.project}`);
     console.log(`  repo:    ${ctx.repo}`);
     if (ctx.repoCommsPath) {
       console.log(`  .ai-comms.json: ${ctx.repoCommsPath}`);
     }
+    console.log(`  transport: ${transport.describe()}`);
 
-    let tokenInfo;
-    try {
-      tokenInfo = getEffectiveToken(ctx.project);
-    } catch (err) {
-      if (err instanceof SecretsError) {
-        console.error(`\n${err.message}`);
+    if (identity.warning) {
+      console.log(`\n⚠ ${identity.warning}`);
+    }
+
+    if (isGitHubBus(ctx.bus)) {
+      try {
+        const collaborators = await getRepoCollaborators(ctx.bus.repo);
+        console.log(`\nCollaborators: ${collaborators.length} (${collaborators.slice(0, 5).join(', ')}${collaborators.length > 5 ? ', …' : ''}) ✓`);
+      } catch (err) {
+        console.error(`\nCollaborators: could not list (${String(err)})`);
         return 1;
       }
-      throw err;
+
+      console.log(`\nBus: GitHub issue #${ctx.bus.issue} on ${ctx.bus.repo} ✓`);
     }
 
-    console.log(`  token:   ${tokenSourceLabel(tokenInfo.source, ctx.project)}`);
-    console.log(`  channel: ${ctx.channelId}\n`);
+    if (isDiscordBus(ctx.bus)) {
+      let tokenInfo;
+      try {
+        tokenInfo = getEffectiveToken(ctx.project);
+      } catch (err) {
+        if (err instanceof SecretsError) {
+          console.error(`\n${err.message}`);
+          return 1;
+        }
+        throw err;
+      }
 
-    try {
-      const bot = await getBotUser(tokenInfo.token);
-      console.log(`Bot: ${bot.username} (${bot.id}) ✓`);
-    } catch {
-      console.error('Bot: could not authenticate. Check the token.');
-      return 1;
-    }
+      console.log(`  token:   ${tokenSourceLabel(tokenInfo.source, ctx.project)}`);
+      console.log(`  channel: ${ctx.bus.channelId}\n`);
 
-    try {
-      const channel = await getChannel(ctx.channelId, tokenInfo.token);
-      const name = channel.name ?? channel.id;
-      console.log(`Channel: #${name} ✓`);
-    } catch {
-      console.error('Channel: inaccessible. Check channelId and bot permissions.');
-      return 1;
-    }
+      try {
+        const bot = await getBotUser(tokenInfo.token);
+        console.log(`Bot: ${bot.username} (${bot.id}) ✓`);
+      } catch {
+        console.error('Bot: could not authenticate. Check the token.');
+        return 1;
+      }
 
-    const perms = await checkBotPermissions(ctx.channelId, tokenInfo.token);
-    if (!perms.ok) {
-      console.error(`Missing permissions: ${perms.missing.join(', ')}`);
-      console.error(
-        `The bot needs VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY (${REQUIRED_PERMISSION_BITS}).`,
-      );
-      console.error(
-        'Re-invite the bot with permissions=68608 or adjust channel overwrites.',
-      );
-      return 1;
-    }
+      try {
+        const channel = await getChannel(ctx.bus.channelId, tokenInfo.token);
+        const name = channel.name ?? channel.id;
+        console.log(`Channel: #${name} ✓`);
+      } catch {
+        console.error('Channel: inaccessible. Check channelId and bot permissions.');
+        return 1;
+      }
 
-    const privacy = await isChannelPubliclyReadable(ctx.channelId, tokenInfo.token);
-    if (privacy.public) {
-      console.log(
-        `Privacy: everyone on the server can read this channel — ${privacy.reason}.\n` +
-          '  The bus carries what your team is building, which files are reserved, and with\n' +
-          '  auto-answer on, excerpts of your code. Deny VIEW_CHANNEL for @everyone and allow\n' +
-          '  only your team and the bot, unless the whole server is your team.',
-      );
-    } else {
-      console.log('Privacy: channel is not readable by @everyone ✓');
+      const perms = await checkBotPermissions(ctx.bus.channelId, tokenInfo.token);
+      if (!perms.ok) {
+        console.error(`Missing permissions: ${perms.missing.join(', ')}`);
+        console.error(
+          `The bot needs VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY (${REQUIRED_PERMISSION_BITS}).`,
+        );
+        return 1;
+      }
+
+      const privacy = await isChannelPubliclyReadable(ctx.bus.channelId, tokenInfo.token);
+      if (privacy.public) {
+        console.log(
+          `Privacy: everyone on the server can read this channel — ${privacy.reason}.`,
+        );
+      } else {
+        console.log('Privacy: channel is not readable by @everyone ✓');
+      }
+      console.log('Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
+
+      if (!identity.authenticated) {
+        console.log(
+          '\nNote: Discord transport does not authenticate identity. Run "ai-comms setup" to migrate to GitHub.',
+        );
+      }
     }
-    console.log('Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
 
     const autoAnswer = resolveAutoAnswer(config.projects[ctx.project]);
     console.log(
@@ -313,7 +289,16 @@ async function runDoctor(projectOverride?: string): Promise<number> {
     );
 
     console.log('\nDiagnostics OK.');
-    console.log(JSON.stringify(redactedContext(ctx), null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          ...redactedContext({ ...ctx, dev: identity.dev }),
+          authenticated: identity.authenticated,
+        },
+        null,
+        2,
+      ),
+    );
     return 0;
   } catch (err) {
     if (err instanceof ConfigError || err instanceof SecretsError) {
@@ -328,9 +313,11 @@ async function runDoctor(projectOverride?: string): Promise<number> {
 async function runInbox(all: boolean, projectOverride?: string): Promise<void> {
   const config = loadConfig();
   const ctx = resolveContext(process.cwd(), config, { projectOverride });
+  const transport = createTransport(ctx, config);
+  const identity = await transport.whoami();
   const log = loadLog(ctx.project);
   const readState = loadReadState(ctx.project);
-  const inbox = materializeInbox(log, ctx.dev, {
+  const inbox = materializeInbox(log, identity.dev, {
     unreadOnly: !all,
     readState,
   });
@@ -379,26 +366,27 @@ const program = new Command();
 program
   .name('ai-comms')
   .description('Coordination channel for AI agents')
-  .version('1.0.0');
+  .version(PACKAGE_VERSION);
 
-program.command('init').description('Create identity and first project').action(async () => {
+program
+  .command('setup')
+  .description('Configure this repo for GitHub bus (no required prompts)')
+  .action(async () => {
+    await runSetup();
+    const code = await runDoctor();
+    process.exitCode = code;
+  });
+
+program.command('init').description('Create identity and first project (legacy Discord)').action(async () => {
   await runInit();
 });
 
 program
   .command('link')
-  .description('Create .ai-comms.json in the current repo')
+  .description('Create .ai-comms.json in the current repo (legacy Discord)')
   .option('--no-instructions', 'Skip writing CLAUDE.md / AGENTS.md instructions block')
   .action(async (opts: { noInstructions?: boolean }) => {
     await runLink({ noInstructions: opts.noInstructions });
-  });
-
-program
-  .command('join')
-  .description('Register a repo with an existing .ai-comms.json')
-  .argument('<path>', 'path to repo')
-  .action(async (repoPath: string) => {
-    await runJoin(repoPath);
   });
 
 const secretCmd = program.command('secret').description('Secret management');
@@ -420,7 +408,7 @@ program
 
 program
   .command('daemon')
-  .description('Listen on Discord channels for all projects')
+  .description('Listen on bus transports for all projects')
   .option('--verbose', 'Verbose log to stderr')
   .action(async (opts: { verbose?: boolean }) => {
     try {

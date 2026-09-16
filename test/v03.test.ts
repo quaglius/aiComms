@@ -396,9 +396,7 @@ describe('auto-answer publishes answer', () => {
         runAgentFn: async () => ({ stdout: 'branch main, clean tree', exitCode: 0 }),
         sendFn: async (env) => {
           sent.push(env);
-          return { id: 'discord1', truncated: false };
         },
-        getTokenFn: () => ({ token: 't', source: 'secrets' as const }),
         appendFn: (env, proj) => appendEnvelope(env, proj),
         logFn: () => [],
         isBudgetAvailableFn: () => true,

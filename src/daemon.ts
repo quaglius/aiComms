@@ -1,12 +1,11 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { Client, GatewayIntentBits, type Message } from 'discord.js';
+import { Client } from 'discord.js';
 import notifier from 'node-notifier';
 import type { ConfigV2 } from './config.js';
 import { loadConfig } from './config.js';
 import { runAutoAnswer } from './auto-answer.js';
-import { parseEnvelopeFromMessage, type Envelope } from './envelope.js';
-import { getEffectiveToken } from './secrets.js';
+import type { Envelope } from './envelope.js';
 import {
   appendEnvelope,
   getDaemonLogPath,
@@ -16,37 +15,18 @@ import {
   removeDaemonPid,
 } from './store.js';
 import { getConfigDir, getProjectDir } from './paths.js';
+import { createTransport } from './transports/index.js';
+import { isDiscordBus, type GitHubBusConfig } from './transports/types.js';
+import { collectDiscordBindings, runDiscordGateway } from './transports/discord-gateway.js';
+import { loadRepoComms, resolveBusFromRepoComms, resolveContext } from './context.js';
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
+const GITHUB_POLL_MS = 15_000;
 
-interface ChannelBinding {
-  channelId: string;
+interface GitHubBinding {
   project: string;
-}
-
-interface TokenGroup {
-  token: string;
-  channels: ChannelBinding[];
-}
-
-function collectTokenGroups(config: ConfigV2): TokenGroup[] {
-  const byToken = new Map<string, ChannelBinding[]>();
-
-  for (const [project, projectConfig] of Object.entries(config.projects ?? {})) {
-    const channelId = projectConfig.discord.channelId;
-    try {
-      const { token } = getEffectiveToken(project);
-      const existing = byToken.get(token) ?? [];
-      if (!existing.some((c) => c.channelId === channelId && c.project === project)) {
-        existing.push({ channelId, project });
-      }
-      byToken.set(token, existing);
-    } catch {
-      // project without token: daemon skips it; doctor will report it
-    }
-  }
-
-  return [...byToken.entries()].map(([token, channels]) => ({ token, channels }));
+  bus: GitHubBusConfig;
+  repoPath: string;
 }
 
 function daemonLog(project: string, message: string, verbose: boolean): void {
@@ -89,10 +69,6 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
     envelope.to.includes(dev) &&
     !envelope.to.includes('*');
 
-  // Prefix with the tool name: on Windows the toast is delivered by SnoreToast
-  // and shows *its* name, not ours, so the title is the only place the user can
-  // tell where the notification came from. A notification you don't recognise
-  // is a notification you ignore.
   const title = `ai-comms · ${envelope.type} · ${envelope.from.dev}/${envelope.from.agent}`;
   const message = envelope.subject;
 
@@ -108,8 +84,6 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
   }
 }
 
-/** At most one auto-answer failure notification per hour, so a broken CLI
- * session cannot turn into a stream of toasts. */
 const AUTO_ANSWER_FAILURE_NOTICE_MS = 60 * 60 * 1000;
 let lastAutoAnswerFailureNotice = 0;
 
@@ -129,25 +103,6 @@ function notifyAutoAnswerFailure(message: string): void {
   }
 }
 
-function processMessage(
-  message: Message,
-  project: string,
-  config: ConfigV2,
-  verbose: boolean,
-): void {
-  const envelope = parseEnvelopeFromMessage(message.content);
-  if (!envelope) {
-    if (verbose) {
-      daemonLog(project, `Message without valid envelope: ${message.id}`, true);
-    }
-    return;
-  }
-
-  saveCursor(project, { lastMessageId: message.id });
-
-  ingestEnvelope(envelope, project, config.identity.dev, config, verbose);
-}
-
 /** Persist every valid envelope; notify only for messages from other devs. */
 export function ingestEnvelope(
   envelope: Envelope,
@@ -161,9 +116,6 @@ export function ingestEnvelope(
   if (config) {
     void runAutoAnswer(envelope, project, config, (message) => {
       daemonLog(project, message, verbose);
-      // A failing answerer is silent by nature: the teammate just never hears
-      // back. The usual cause is an expired CLI session, which can sit broken
-      // for days. Surface it once so the human can re-authenticate.
       if (/auto-answer (failed|produced no answer)/.test(message)) {
         notifyAutoAnswerFailure(message);
       }
@@ -179,171 +131,209 @@ export function ingestEnvelope(
   return { notified: false };
 }
 
-/** Discord's hard per-request cap on `limit` for channel message fetches. */
-const MAX_FETCH_PAGE = 100;
-/** How far back to read when there is no cursor yet. */
-const COLD_START_HISTORY = 200;
+function collectGitHubBindings(config: ConfigV2): GitHubBinding[] {
+  const bindings: GitHubBinding[] = [];
 
-function sortById<T extends { id: string }>(messages: T[]): T[] {
-  return [...messages].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+  for (const [project, projectConfig] of Object.entries(config.projects ?? {})) {
+    const bus = projectConfig.bus;
+    if (!bus || bus.kind !== 'github') continue;
+
+    const repoPath = projectConfig.repos?.[0]?.path ?? process.cwd();
+    bindings.push({ project, bus, repoPath });
+  }
+
+  return bindings;
 }
 
-async function backfillHistory(
-  client: Client,
-  channelId: string,
-  project: string,
+async function pollGitHubBinding(
+  binding: GitHubBinding,
   config: ConfigV2,
   verbose: boolean,
 ): Promise<void> {
-  const channel = await client.channels.fetch(channelId);
-  if (!channel || !channel.isTextBased() || channel.isDMBased()) {
-    throw new Error(`Channel ${channelId} is not a valid text channel`);
+  const cursor = loadCursor(binding.project);
+
+  const ctx = resolveContext(binding.repoPath, config, { projectOverride: binding.project });
+  const transport = createTransport(ctx, config, {
+    onIdentityMismatch: (declared, actual, commentId) => {
+      daemonLog(
+        binding.project,
+        `identity mismatch on comment ${commentId}: payload declared "${declared}", GitHub author "${actual}"`,
+        verbose,
+      );
+    },
+    getEtag: () => cursor?.etag,
+    setEtag: (etag) => {
+      if (etag) {
+        saveCursor(binding.project, { ...loadCursor(binding.project), etag });
+      }
+    },
+  });
+
+  let dev = config.identity?.dev ?? '';
+  try {
+    dev = (await transport.whoami()).dev;
+  } catch (err) {
+    daemonLog(binding.project, `whoami failed: ${String(err)}`, verbose);
   }
 
-  const cursor = loadCursor(project);
+  const result = await transport.fetchSince(cursor?.lastSince ?? null);
 
-  // Discord caps `limit` at 100 per request, so both paths have to paginate.
-  // Without this, a cold start silently loses every claim older than the last
-  // 100 messages, and a daemon that was down for a while misses the backlog.
-  const collected: Message[] = [];
-
-  if (cursor?.lastMessageId) {
-    let after = cursor.lastMessageId;
-    for (;;) {
-      const page = await channel.messages.fetch({ after, limit: MAX_FETCH_PAGE });
-      if (page.size === 0) break;
-      const asc = sortById([...page.values()]);
-      collected.push(...asc);
-      after = asc[asc.length - 1]!.id;
-      if (page.size < MAX_FETCH_PAGE) break;
-    }
-  } else {
-    let before: string | undefined;
-    while (collected.length < COLD_START_HISTORY) {
-      const page = await channel.messages.fetch({
-        limit: Math.min(MAX_FETCH_PAGE, COLD_START_HISTORY - collected.length),
-        ...(before ? { before } : {}),
-      });
-      if (page.size === 0) break;
-      const asc = sortById([...page.values()]);
-      collected.push(...asc);
-      before = asc[0]!.id;
-      if (page.size < MAX_FETCH_PAGE) break;
-    }
+  if (result.envelopes.length === 0 && result.cursor === (cursor?.lastSince ?? null)) {
+    return;
   }
 
-  const sorted = sortById(collected);
-
-  for (const msg of sorted) {
-    processMessage(msg, project, config, verbose);
+  for (const envelope of result.envelopes) {
+    ingestEnvelope(envelope, binding.project, dev, config, verbose);
   }
 
-  if (sorted.length > 0) {
-    saveCursor(project, { lastMessageId: sorted[sorted.length - 1]!.id });
+  if (result.cursor && result.cursor !== cursor?.lastSince) {
+    saveCursor(binding.project, {
+      ...loadCursor(binding.project),
+      lastSince: result.cursor,
+    });
   }
 }
 
-async function runClientForToken(
-  group: TokenGroup,
+async function backfillGitHubBinding(
+  binding: GitHubBinding,
   config: ConfigV2,
   verbose: boolean,
-): Promise<Client> {
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-    ],
-  });
+): Promise<void> {
+  const cursor = loadCursor(binding.project);
 
-  const channelIds = new Set(group.channels.map((c) => c.channelId));
-  const projectByChannel = new Map(group.channels.map((c) => [c.channelId, c.project]));
-
-  let reconnectAttempt = 0;
-
-  client.on('ready', async () => {
-    reconnectAttempt = 0;
-    for (const binding of group.channels) {
-      daemonLog(binding.project, 'Daemon connected', verbose);
-      try {
-        await backfillHistory(
-          client,
-          binding.channelId,
-          binding.project,
-          config,
-          verbose,
-        );
-      } catch (err) {
-        daemonLog(binding.project, `Backfill error: ${String(err)}`, verbose);
+  const ctx = resolveContext(binding.repoPath, config, { projectOverride: binding.project });
+  const transport = createTransport(ctx, config, {
+    onIdentityMismatch: (declared, actual, commentId) => {
+      daemonLog(
+        binding.project,
+        `identity mismatch on comment ${commentId}: payload declared "${declared}", GitHub author "${actual}"`,
+        verbose,
+      );
+    },
+    getEtag: () => cursor?.etag,
+    setEtag: (etag) => {
+      if (etag) {
+        saveCursor(binding.project, { ...loadCursor(binding.project), etag });
       }
-    }
+    },
   });
 
-  client.on('messageCreate', (message) => {
-    if (!channelIds.has(message.channelId)) return;
-    const project = projectByChannel.get(message.channelId);
-    if (!project) return;
-    try {
-      processMessage(message, project, config, verbose);
-    } catch (err) {
-      daemonLog(project, `Error processing message: ${String(err)}`, verbose);
-    }
-  });
+  let dev = config.identity?.dev ?? '';
+  try {
+    dev = (await transport.whoami()).dev;
+  } catch {
+    // logged on poll
+  }
 
-  client.on('error', (err) => {
-    for (const binding of group.channels) {
-      daemonLog(binding.project, `Client error: ${String(err)}`, verbose);
-    }
-  });
+  const result = await (transport.backfill?.(cursor?.lastSince ?? null) ??
+    transport.fetchSince(cursor?.lastSince ?? null));
+  for (const envelope of result.envelopes) {
+    ingestEnvelope(envelope, binding.project, dev, config, verbose);
+  }
 
-  const connectWithBackoff = async (): Promise<void> => {
-    for (;;) {
+  if (result.cursor) {
+    saveCursor(binding.project, {
+      ...loadCursor(binding.project),
+      lastSince: result.cursor,
+    });
+  }
+}
+
+function buildDiscordBusMap(config: ConfigV2): Map<string, { kind: 'discord'; channelId: string }> {
+  const map = new Map<string, { kind: 'discord'; channelId: string }>();
+
+  for (const [project, projectConfig] of Object.entries(config.projects ?? {})) {
+    if (projectConfig.discord) {
+      map.set(project, { kind: 'discord', channelId: projectConfig.discord.channelId });
+    }
+    for (const repo of projectConfig.repos ?? []) {
+      const repoCommsPath = path.join(repo.path, '.ai-comms.json');
+      if (!existsSync(repoCommsPath)) continue;
       try {
-        await client.login(group.token);
-        return;
-      } catch (err) {
-        reconnectAttempt++;
-        const delay = Math.min(60_000, 1000 * 2 ** reconnectAttempt);
-        for (const binding of group.channels) {
-          daemonLog(
-            binding.project,
-            `Login failed (${String(err)}), retrying in ${delay}ms`,
-            verbose,
-          );
+        const repoComms = loadRepoComms(repoCommsPath);
+        if (repoComms.project !== project) continue;
+        const bus = resolveBusFromRepoComms(repoComms);
+        if (isDiscordBus(bus)) {
+          map.set(project, bus);
         }
-        await new Promise((r) => setTimeout(r, delay));
+      } catch {
+        // skip invalid
       }
     }
-  };
+  }
 
-  await connectWithBackoff();
-  return client;
+  return map;
 }
 
 export async function runDaemon(options: { verbose?: boolean } = {}): Promise<void> {
   const verbose = options.verbose ?? false;
   const config = loadConfig();
-  const groups = collectTokenGroups(config);
 
-  if (groups.length === 0) {
+  const discordBusMap = buildDiscordBusMap(config);
+  const discordGroups = collectDiscordBindings(config, discordBusMap);
+  const githubBindings = collectGitHubBindings(config);
+
+  if (discordGroups.length === 0 && githubBindings.length === 0) {
     throw new Error(
-      'No projects with a configured token. Run "ai-comms secret set <project>".',
+      'No projects with a configured transport. Run "ai-comms setup" or configure a legacy Discord project.',
     );
   }
 
   mkdirSync(getConfigDir(), { recursive: true });
 
-  const projects = [...new Set(groups.flatMap((g) => g.channels.map((c) => c.project)))];
+  const projects = [
+    ...new Set([
+      ...discordGroups.flatMap((g) => g.bindings.map((b) => b.project)),
+      ...githubBindings.map((b) => b.project),
+    ]),
+  ];
+
   for (const project of projects) {
     writeDaemonPid(project);
   }
 
   const clients: Client[] = [];
-  for (const group of groups) {
-    clients.push(await runClientForToken(group, config, verbose));
+
+  for (const group of discordGroups) {
+    const client = await runDiscordGateway(group.bindings, {
+      onEnvelope: (project, envelope, messageId) => {
+        saveCursor(project, {
+          ...loadCursor(project),
+          lastMessageId: messageId,
+        });
+        const dev = config.identity?.dev ?? '';
+        ingestEnvelope(envelope, project, dev, config, verbose);
+      },
+      onLog: (project, message) => {
+        daemonLog(project, message, verbose);
+      },
+    }, group.token);
+    clients.push(client);
+  }
+
+  for (const binding of githubBindings) {
+    try {
+      await backfillGitHubBinding(binding, config, verbose);
+      daemonLog(binding.project, 'GitHub backfill complete', verbose);
+    } catch (err) {
+      daemonLog(binding.project, `GitHub backfill error: ${String(err)}`, verbose);
+    }
+  }
+
+  const pollTimers: NodeJS.Timeout[] = [];
+  for (const binding of githubBindings) {
+    const timer = setInterval(() => {
+      void pollGitHubBinding(binding, config, verbose).catch((err) => {
+        daemonLog(binding.project, `GitHub poll error: ${String(err)}`, verbose);
+      });
+    }, GITHUB_POLL_MS);
+    pollTimers.push(timer);
   }
 
   const shutdown = () => {
+    for (const timer of pollTimers) {
+      clearInterval(timer);
+    }
     for (const project of projects) {
       removeDaemonPid(project);
     }

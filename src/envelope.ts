@@ -40,7 +40,7 @@ export const EnvelopeSchema = z
     to: z.array(z.string().min(1)).min(1),
     type: z.enum(MESSAGE_TYPES),
     subject: z.string().max(120),
-    body: z.string().max(600).default(''),
+    body: z.string().max(4000).default(''),
     refs: RefsSchema.default({}),
     reply_to: z.string().nullable().default(null),
     hops: z.number().int().min(0).max(3),
@@ -55,7 +55,7 @@ export type From = z.infer<typeof FromSchema>;
 export const SendInputShape = {
   type: z.enum(MESSAGE_TYPES),
   subject: z.string().max(120),
-  body: z.string().max(600).optional(),
+  body: z.string().max(4000).optional(),
   to: z.array(z.string().min(1)).optional(),
   refs: RefsSchema.optional(),
   reply_to: z.string().nullable().optional(),
@@ -76,7 +76,15 @@ const TYPE_EMOJI: Record<MessageType, string> = {
   done: '✅',
 };
 
-const DISCORD_CHAR_LIMIT = 1900;
+export const DISCORD_RENDER_CHAR_LIMIT = 1900;
+export const DISCORD_BODY_MAX = 600;
+export const GITHUB_RENDER_CHAR_LIMIT = 65536;
+export const GITHUB_BODY_MAX = 4000;
+
+export interface RenderOptions {
+  charLimit?: number;
+  bodyMax?: number;
+}
 
 export function defaultTtl(fromTs: string): string {
   const base = new Date(fromTs);
@@ -139,7 +147,10 @@ export interface RenderResult {
   truncated: boolean;
 }
 
-export function renderEnvelope(envelope: Envelope): RenderResult {
+export function renderEnvelope(envelope: Envelope, options: RenderOptions = {}): RenderResult {
+  const charLimit = options.charLimit ?? DISCORD_RENDER_CHAR_LIMIT;
+  const bodyMax = options.bodyMax ?? DISCORD_BODY_MAX;
+
   const emoji = TYPE_EMOJI[envelope.type];
   const line1 = `${emoji} **${envelope.type}** ${envelope.from.dev}/${envelope.from.agent} · ${envelope.from.repo}`;
   const line2 = envelope.subject;
@@ -152,35 +163,38 @@ export function renderEnvelope(envelope: Envelope): RenderResult {
     return `${header}\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``;
   };
 
-  let body = envelope.body;
-  if (buildContent(body).length <= DISCORD_CHAR_LIMIT) {
-    return { content: buildContent(body), truncated: false };
+  let body = envelope.body.length > bodyMax ? envelope.body.slice(0, bodyMax - 1) + '…' : envelope.body;
+  let bodyTruncated = envelope.body.length > bodyMax;
+
+  if (buildContent(body).length <= charLimit) {
+    return { content: buildContent(body), truncated: bodyTruncated };
   }
 
   while (body.length > 0) {
     body = body.slice(0, Math.max(0, body.length - 50));
     if (body.length > 0) body += '…';
-    if (buildContent(body).length <= DISCORD_CHAR_LIMIT) {
+    bodyTruncated = true;
+    if (buildContent(body).length <= charLimit) {
       return { content: buildContent(body), truncated: true };
     }
   }
 
   const fallback = buildContent('');
-  if (fallback.length <= DISCORD_CHAR_LIMIT) {
+  if (fallback.length <= charLimit) {
     return { content: fallback, truncated: true };
   }
 
   // Even with an empty body it doesn't fit: cutting here would produce a corrupt
   // json block in the channel. Fail loudly rather than publish an unreadable envelope.
   throw new EnvelopeTooLargeError(
-    `Envelope does not fit in ${DISCORD_CHAR_LIMIT} chars even with an empty body ` +
+    `Envelope does not fit in ${charLimit} chars even with an empty body ` +
       `(${fallback.length}). Reduce refs.paths or shorten the subject.`,
   );
 }
 
 const JSON_BLOCK_RE = /```json\s*\n([\s\S]*?)\n```/;
 
-export function parseEnvelopeFromMessage(content: string): Envelope | null {
+export function parseEnvelopeFromContent(content: string): Envelope | null {
   const match = content.match(JSON_BLOCK_RE);
   if (!match) return null;
   try {
@@ -190,6 +204,9 @@ export function parseEnvelopeFromMessage(content: string): Envelope | null {
     return null;
   }
 }
+
+/** @deprecated use parseEnvelopeFromContent */
+export const parseEnvelopeFromMessage = parseEnvelopeFromContent;
 
 export function validateClaimInput(input: SendInput): string | null {
   if (input.type !== 'claim') return null;

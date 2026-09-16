@@ -13,15 +13,15 @@ npm install -g @quaglius/ai-comms
 ai-comms <command>
 ```
 
-Requirements: Node ≥ 22.
+Requirements: Node ≥ 20, `gh` authenticated for GitHub bus setups.
 
-Full setup (Discord, token, repos): [`SETUP-FOR-AGENTS.md`](SETUP-FOR-AGENTS.md).
+Full setup: [`SETUP-FOR-AGENTS.md`](SETUP-FOR-AGENTS.md).
 
 ---
 
 ## Claude Code
 
-Add to the project or global MCP config file:
+Add to the project or global MCP config:
 
 ```json
 {
@@ -37,24 +37,24 @@ Add to the project or global MCP config file:
 Or install the plugin from this repo (`.claude-plugin/plugin.json`), which registers
 the MCP, the skill, and the `/bus:claim`, `/bus:inbox`, `/bus:claims` commands.
 
----
-
-## Cursor
-
-In **Cursor Settings → MCP**, add a server:
+`ai-comms setup` writes a pinned `.mcp.json` in the repo:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["@quaglius/ai-comms", "mcp"]
+      "args": ["-y", "@quaglius/ai-comms@0.5.0", "mcp"]
     }
   }
 }
 ```
 
-Or in the project's `.cursor/mcp.json`:
+---
+
+## Cursor
+
+In **Cursor Settings → MCP**, or in `.cursor/mcp.json`:
 
 ```json
 {
@@ -72,8 +72,6 @@ Cursor also reads [`AGENTS.md`](../AGENTS.md) at the repo root.
 ---
 
 ## Codex (OpenAI)
-
-In Codex MCP configuration:
 
 ```json
 {
@@ -109,9 +107,10 @@ In `~/.gemini/settings.json` or the project MCP config:
 
 ## Verify it works
 
-1. Open the project from a repo with `.ai-comms.json`.
+1. Open a repo with `.ai-comms.json` (run `ai-comms setup` if missing).
 2. Run the `bus_whoami` tool.
-3. It should return `dev`, `project`, `repo`, `channelId`, and `repoCommsPath` without a token.
+3. Expect `dev` (GitHub login or legacy configured slug), `project`, `repo`,
+   `transport`, and `authenticated` — **no token** in the response.
 
 If it fails, run `npx @quaglius/ai-comms doctor` in the terminal.
 
@@ -121,8 +120,9 @@ If it fails, run `npx @quaglius/ai-comms doctor` in the terminal.
 
 | Tool | Description |
 |---|---|
-| `bus_send` | Publish an envelope (`project` optional for cross-project) |
+| `bus_send` | Publish an envelope on the bus |
 | `bus_inbox` | Active envelopes addressed to you |
 | `bus_claims` | Active team claims |
 | `bus_release` | Release a claim |
 | `bus_whoami` | Identity and resolved context |
+| `bus_ask` | Directed ask with blocking wait |

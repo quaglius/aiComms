@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { PACKAGE_VERSION } from './version.js';
 import { loadConfig, redactedContext } from './config.js';
 import { resolveContext, validateRecipients } from './context.js';
-import { sendEnvelope } from './discord.js';
+import { getRepoCollaborators } from './collaborators.js';
+import { createNotifiers } from './notifiers/index.js';
+import { createTransport } from './transports/index.js';
+import { isGitHubBus } from './transports/types.js';
 import {
   createEnvelope,
   EnvelopeTooLargeError,
@@ -13,7 +16,6 @@ import {
   validateClaimInput,
   type Envelope,
 } from './envelope.js';
-import { getEffectiveToken, tokenSourceLabel } from './secrets.js';
 import {
   appendEnvelope,
   findClaimConflicts,
@@ -45,12 +47,23 @@ function withSecurityPreamble(body: string, hasForeign: boolean): string {
   return `${SECURITY_PREAMBLE}\n\n${body}`;
 }
 
+async function resolveTeam(ctx: ReturnType<typeof resolveContext>): Promise<string[]> {
+  if (isGitHubBus(ctx.bus) && ctx.githubRepo) {
+    try {
+      return await getRepoCollaborators(ctx.githubRepo);
+    } catch {
+      return [];
+    }
+  }
+  return ctx.team;
+}
+
 export function createMcpServer(): McpServer {
   const server = new McpServer({ name: 'ai-comms', version: PACKAGE_VERSION });
 
   server.tool(
     'bus_send',
-    'Publish an envelope on the Discord bus',
+    'Publish an envelope on the bus',
     {
       ...SendInputShape,
       project: z.string().optional(),
@@ -67,17 +80,21 @@ export function createMcpServer(): McpServer {
         return { content: [{ type: 'text' as const, text: `Error: ${claimError}` }] };
       }
 
+      const transport = createTransport(ctx, config);
+      const identity = await transport.whoami();
+      const team = await resolveTeam(ctx);
+
       const log = loadLog(ctx.project);
 
       const recipientWarnings = input.to
-        ? validateRecipients(input.to, ctx.team, ctx.dev, {
+        ? validateRecipients(input.to, team, identity.dev, {
             log,
             replyTo: input.reply_to,
           })
         : [];
 
       const envelope = createEnvelope(input, {
-        dev: ctx.dev,
+        dev: identity.dev,
         agent: ctx.agent,
         repo: ctx.repo,
       });
@@ -86,7 +103,7 @@ export function createMcpServer(): McpServer {
       if (input.type === 'claim' && input.refs?.paths && input.refs.until) {
         const conflicts = findClaimConflicts(
           input.refs.paths,
-          ctx.dev,
+          identity.dev,
           ctx.repo,
           log,
           { newUntil: input.refs.until },
@@ -98,9 +115,11 @@ export function createMcpServer(): McpServer {
         }
       }
 
-      const { token } = getEffectiveToken(ctx.project);
       try {
-        await sendEnvelope(envelope, ctx.channelId, token);
+        await transport.send(envelope);
+        for (const notifier of createNotifiers(ctx.notifiers, ctx.project)) {
+          await notifier.notify(envelope);
+        }
       } catch (err) {
         if (err instanceof EnvelopeTooLargeError) {
           return { content: [{ type: 'text' as const, text: `Error: ${err.message}` }] };
@@ -138,9 +157,11 @@ export function createMcpServer(): McpServer {
       const ctx = resolveContext(process.cwd(), config, {
         projectOverride: args.project,
       });
+      const transport = createTransport(ctx, config);
+      const identity = await transport.whoami();
       const log = loadLog(ctx.project);
       const readState = loadReadState(ctx.project);
-      const inbox = materializeInbox(log, ctx.dev, {
+      const inbox = materializeInbox(log, identity.dev, {
         since: args.since,
         unreadOnly: args.unread_only,
         readState,
@@ -153,7 +174,7 @@ export function createMcpServer(): McpServer {
           'Warning: the log has not been updated in over 5 minutes and the daemon does not appear to be running. The inbox may be stale.\n\n';
       }
 
-      const hasForeign = inbox.some((e) => e.from.dev !== ctx.dev);
+      const hasForeign = inbox.some((e) => e.from.dev !== identity.dev);
       const body = staleWarning + formatInboxForDisplay(inbox, log);
 
       return {
@@ -171,9 +192,11 @@ export function createMcpServer(): McpServer {
       const ctx = resolveContext(process.cwd(), config, {
         projectOverride: args.project,
       });
+      const transport = createTransport(ctx, config);
+      const identity = await transport.whoami();
       const log = loadLog(ctx.project);
       const claims = materializeActiveClaims(log);
-      const foreign = claims.filter((c) => c.dev !== ctx.dev);
+      const foreign = claims.filter((c) => c.dev !== identity.dev);
 
       const body =
         claims.length === 0
@@ -203,6 +226,8 @@ export function createMcpServer(): McpServer {
       const ctx = resolveContext(process.cwd(), config, {
         projectOverride: args.project,
       });
+      const transport = createTransport(ctx, config);
+      const identity = await transport.whoami();
       const envelope = createEnvelope(
         {
           type: 'release',
@@ -210,11 +235,13 @@ export function createMcpServer(): McpServer {
           reply_to: args.claim_id,
           to: ['*'],
         },
-        { dev: ctx.dev, agent: ctx.agent, repo: ctx.repo },
+        { dev: identity.dev, agent: ctx.agent, repo: ctx.repo },
       );
 
-      const { token } = getEffectiveToken(ctx.project);
-      await sendEnvelope(envelope, ctx.channelId, token);
+      await transport.send(envelope);
+      for (const notifier of createNotifiers(ctx.notifiers, ctx.project)) {
+        await notifier.notify(envelope);
+      }
       appendEnvelope(envelope, ctx.project);
 
       return {
@@ -226,10 +253,13 @@ export function createMcpServer(): McpServer {
   server.tool('bus_whoami', 'Identity and effective config (no token)', {}, async () => {
     const config = loadConfig();
     const ctx = resolveContext(process.cwd(), config);
-    const tokenInfo = getEffectiveToken(ctx.project);
+    const transport = createTransport(ctx, config);
+    const identity = await transport.whoami();
     const effective = {
-      ...redactedContext(ctx),
-      tokenSource: tokenSourceLabel(tokenInfo.source, ctx.project),
+      ...redactedContext({ ...ctx, dev: identity.dev }),
+      transport: transport.describe(),
+      authenticated: identity.authenticated,
+      ...(identity.warning ? { warning: identity.warning } : {}),
     };
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(effective, null, 2) }],
@@ -243,7 +273,7 @@ export function createMcpServer(): McpServer {
       question: z.string().min(1),
       to: z.array(z.string().min(1)).optional(),
       timeout_s: z.number().int().min(1).max(120).optional(),
-      context: z.string().max(600).optional(),
+      context: z.string().max(4000).optional(),
       project: z.string().optional(),
     },
     async (args) => {
@@ -251,33 +281,38 @@ export function createMcpServer(): McpServer {
       const ctx = resolveContext(process.cwd(), config, {
         projectOverride: args.project,
       });
+      const transport = createTransport(ctx, config);
+      const identity = await transport.whoami();
+      const team = await resolveTeam(ctx);
 
-      const recipients = args.to ?? defaultBusAskRecipients(ctx.team, ctx.dev);
+      const recipients = args.to ?? defaultBusAskRecipients(team, identity.dev);
       if (!recipients || recipients.length === 0) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: 'Error: no recipients. Set `to` explicitly or add team members to .ai-comms.json.',
+              text: 'Error: no recipients. Set `to` explicitly or ensure repo collaborators are visible.',
             },
           ],
         };
       }
 
-      const recipientWarnings = validateRecipients(recipients, ctx.team, ctx.dev, {
+      const recipientWarnings = validateRecipients(recipients, team, identity.dev, {
         log: loadLog(ctx.project),
       });
 
       const envelope = buildBusAskEnvelope(
         args.question,
         recipients,
-        { dev: ctx.dev, agent: ctx.agent, repo: ctx.repo },
+        { dev: identity.dev, agent: ctx.agent, repo: ctx.repo },
         args.context,
       );
 
-      const { token } = getEffectiveToken(ctx.project);
       try {
-        await sendEnvelope(envelope, ctx.channelId, token);
+        await transport.send(envelope);
+        for (const notifier of createNotifiers(ctx.notifiers, ctx.project)) {
+          await notifier.notify(envelope);
+        }
       } catch (err) {
         if (err instanceof EnvelopeTooLargeError) {
           return { content: [{ type: 'text' as const, text: `Error: ${err.message}` }] };

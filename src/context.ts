@@ -4,15 +4,55 @@ import { z } from 'zod';
 import { ConfigError, type ConfigV2, loadConfig } from './config.js';
 import type { Envelope } from './envelope.js';
 import { REPO_COMMS_FILENAME } from './paths.js';
+import type { BusConfig } from './transports/types.js';
+
+const GitHubBusSchema = z
+  .object({
+    kind: z.literal('github'),
+    repo: z.string().min(1),
+    issue: z.number().int().positive(),
+  })
+  .strict();
+
+const DiscordBusSchema = z
+  .object({
+    kind: z.literal('discord'),
+    channelId: z.string().min(1),
+  })
+  .strict();
+
+const LegacyDiscordSchema = z
+  .object({
+    channelId: z.string().min(1),
+  })
+  .strict();
+
+const DiscordWebhookNotifierSchema = z
+  .object({
+    kind: z.literal('discord-webhook'),
+    urlRef: z.string().min(1),
+  })
+  .strict();
 
 export const RepoCommsSchema = z
   .object({
     project: z.string().min(1),
     repo: z.string().min(1),
-    discord: z.object({ channelId: z.string().min(1) }).strict(),
+    bus: z.union([GitHubBusSchema, DiscordBusSchema]).optional(),
+    discord: LegacyDiscordSchema.optional(),
+    notifiers: z.array(DiscordWebhookNotifierSchema).optional(),
     team: z.array(z.string().min(1)).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (!value.bus && !value.discord) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Either bus or discord is required',
+        path: ['bus'],
+      });
+    }
+  });
 
 export type RepoComms = z.infer<typeof RepoCommsSchema>;
 
@@ -21,10 +61,14 @@ export interface ResolvedContext {
   repo: string;
   dev: string;
   agent: string;
-  channelId: string;
+  bus: BusConfig;
+  githubRepo: string | null;
   team: string[];
+  notifiers: z.infer<typeof DiscordWebhookNotifierSchema>[];
   repoCommsPath: string | null;
   source: 'repo' | 'user-config';
+  /** @deprecated use bus.channelId for Discord */
+  channelId: string;
 }
 
 export class ContextError extends Error {
@@ -32,6 +76,14 @@ export class ContextError extends Error {
     super(message);
     this.name = 'ContextError';
   }
+}
+
+export function resolveBusFromRepoComms(repoComms: RepoComms): BusConfig {
+  if (repoComms.bus) return repoComms.bus;
+  if (repoComms.discord) {
+    return { kind: 'discord', channelId: repoComms.discord.channelId };
+  }
+  throw new ContextError('Repo comms missing bus configuration');
 }
 
 export function findRepoCommsFile(startDir: string): string | null {
@@ -54,7 +106,7 @@ export function loadRepoComms(filePath: string): RepoComms {
     raw = JSON.parse(readFileSync(filePath, 'utf8'));
   } catch {
     throw new ContextError(
-      `${filePath} is not valid JSON. Fix the file or run "ai-comms link" again.`,
+      `${filePath} is not valid JSON. Fix the file or run "ai-comms setup" again.`,
     );
   }
 
@@ -64,7 +116,7 @@ export function loadRepoComms(filePath: string): RepoComms {
       .map((i) => `${i.path.join('.')}: ${i.message}`)
       .join('; ');
     throw new ContextError(
-      `${filePath} is invalid: ${issues}. Run "ai-comms link" to regenerate it.`,
+      `${filePath} is invalid: ${issues}. Run "ai-comms setup" to regenerate it.`,
     );
   }
 
@@ -75,7 +127,7 @@ function resolveRepoFromUserConfig(
   cwd: string,
   config: ConfigV2,
   project: string,
-): { repo: string; channelId: string } | null {
+): { repo: string; bus: BusConfig; githubRepo: string | null } | null {
   const projectConfig = config.projects?.[project];
   if (!projectConfig) return null;
 
@@ -85,10 +137,20 @@ function resolveRepoFromUserConfig(
   for (const entry of repos) {
     const repoPath = path.resolve(entry.path);
     if (resolvedCwd === repoPath || resolvedCwd.startsWith(repoPath + path.sep)) {
-      return {
-        repo: entry.name,
-        channelId: projectConfig.discord.channelId,
-      };
+      if (projectConfig.bus) {
+        return {
+          repo: entry.name,
+          bus: projectConfig.bus,
+          githubRepo: projectConfig.bus.kind === 'github' ? projectConfig.bus.repo : null,
+        };
+      }
+      if (projectConfig.discord) {
+        return {
+          repo: entry.name,
+          bus: { kind: 'discord', channelId: projectConfig.discord.channelId },
+          githubRepo: null,
+        };
+      }
     }
   }
 
@@ -105,15 +167,20 @@ export function resolveContext(
 
   if (repoCommsPath && !options.projectOverride) {
     const repoComms = loadRepoComms(repoCommsPath);
+    const bus = resolveBusFromRepoComms(repoComms);
+    const channelId = bus.kind === 'discord' ? bus.channelId : '';
     return {
       project: repoComms.project,
       repo: repoComms.repo,
-      dev: cfg.identity.dev,
-      agent: cfg.identity.agent,
-      channelId: repoComms.discord.channelId,
+      dev: cfg.identity?.dev ?? '',
+      agent: cfg.agent ?? cfg.identity?.agent ?? 'claude-code',
+      bus,
+      githubRepo: bus.kind === 'github' ? bus.repo : null,
       team: repoComms.team ?? [],
+      notifiers: repoComms.notifiers ?? [],
       repoCommsPath,
       source: 'repo',
+      channelId,
     };
   }
 
@@ -127,22 +194,27 @@ export function resolveContext(
     if (repoComms.project !== options.projectOverride) {
       const fromUser = resolveRepoFromUserConfig(cwd, cfg, options.projectOverride);
       if (fromUser) {
-        return buildUserConfigContext(cfg, project, fromUser.repo, fromUser.channelId, null);
+        return buildUserConfigContext(cfg, project, fromUser.repo, fromUser.bus, fromUser.githubRepo, null);
       }
       throw new ContextError(
         `Project "${options.projectOverride}" does not match ${repoCommsPath} ` +
           `(project=${repoComms.project}).`,
       );
     }
+    const bus = resolveBusFromRepoComms(repoComms);
+    const channelId = bus.kind === 'discord' ? bus.channelId : '';
     return {
       project: repoComms.project,
       repo: repoComms.repo,
-      dev: cfg.identity.dev,
-      agent: cfg.identity.agent,
-      channelId: repoComms.discord.channelId,
+      dev: cfg.identity?.dev ?? '',
+      agent: cfg.agent ?? cfg.identity?.agent ?? 'claude-code',
+      bus,
+      githubRepo: bus.kind === 'github' ? bus.repo : null,
       team: repoComms.team ?? [],
+      notifiers: repoComms.notifiers ?? [],
       repoCommsPath,
       source: 'repo',
+      channelId,
     };
   }
 
@@ -152,13 +224,12 @@ export function resolveContext(
       cfg,
       project,
       fromUser.repo,
-      fromUser.channelId,
+      fromUser.bus,
+      fromUser.githubRepo,
       null,
     );
   }
 
-  // Without .ai-comms.json and without a declared repo, don't invent the repo name:
-  // a misnamed repo silently breaks claim scoping, which is the tool's core job.
   throw new ContextError(contextResolutionError());
 }
 
@@ -166,25 +237,30 @@ function buildUserConfigContext(
   config: ConfigV2,
   project: string,
   repo: string,
-  channelId: string,
+  bus: BusConfig,
+  githubRepo: string | null,
   repoCommsPath: string | null,
 ): ResolvedContext {
+  const channelId = bus.kind === 'discord' ? bus.channelId : '';
   return {
     project,
     repo,
-    dev: config.identity.dev,
-    agent: config.identity.agent,
-    channelId,
+    dev: config.identity?.dev ?? '',
+    agent: config.agent ?? config.identity?.agent ?? 'claude-code',
+    bus,
+    githubRepo,
     team: [],
+    notifiers: [],
     repoCommsPath,
     source: 'user-config',
+    channelId,
   };
 }
 
 export function contextResolutionError(): string {
   return (
     'Could not resolve project/repo context.\n' +
-    '  · Run "ai-comms link" inside the repo to create .ai-comms.json, or\n' +
+    '  · Run "ai-comms setup" inside the repo, or\n' +
     '  · Pass --project <name> if it is already configured in ~/.ai-comms/config.json.'
   );
 }

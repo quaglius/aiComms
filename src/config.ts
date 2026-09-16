@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { z } from 'zod';
 import { maybeMigrateV0 } from './migrate.js';
 import { getConfigDir, getConfigPath } from './paths.js';
+import type { BusConfig } from './transports/types.js';
 
 const IdentitySchema = z.object({
   dev: z.string().min(1),
@@ -10,6 +11,12 @@ const IdentitySchema = z.object({
 
 const ProjectDiscordSchema = z.object({
   channelId: z.string().min(1),
+});
+
+const GitHubBusSchema = z.object({
+  kind: z.literal('github'),
+  repo: z.string().min(1),
+  issue: z.number().int().positive(),
 });
 
 const RepoEntrySchema = z.object({
@@ -22,26 +29,22 @@ const AutoAnswerConfigSchema = z
     enabled: z.boolean(),
     maxPerRequesterPerHour: z.number().int().positive().default(5),
     timeoutSeconds: z.number().int().positive().max(120).default(120),
-    // Where the headless answerer runs. Required once a project has more than
-    // one repo: point it at the directory that contains them so the answerer
-    // can read all of them.
     repoPath: z.string().min(1).optional(),
-    // An ask older than this is not worth answering: bus_ask blocks for at most
-    // two minutes, so a late answer reaches nobody and spends the responder's
-    // quota. Also stops a daemon restart from replying to a backlog.
     maxAgeMinutes: z.number().int().positive().default(10),
   })
   .strict();
 
 const ProjectConfigSchema = z.object({
-  discord: ProjectDiscordSchema,
+  discord: ProjectDiscordSchema.optional(),
+  bus: GitHubBusSchema.optional(),
   repos: z.array(RepoEntrySchema).optional(),
   autoAnswer: AutoAnswerConfigSchema.optional(),
 });
 
 export const ConfigV2Schema = z.object({
   version: z.literal(2),
-  identity: IdentitySchema,
+  identity: IdentitySchema.optional(),
+  agent: z.string().min(1).optional(),
   defaultProject: z.string().min(1),
   projects: z.record(z.string(), ProjectConfigSchema).default({}),
 });
@@ -90,7 +93,7 @@ export function loadConfig(configPath = getConfigPath()): ConfigV2 {
 
   if (!existsSync(configPath)) {
     throw new ConfigError(
-      `No config found at ${configPath}. Run "ai-comms init" to create one.`,
+      `No config found at ${configPath}. Run "ai-comms setup" to create one.`,
     );
   }
 
@@ -134,19 +137,24 @@ export function redactedContext(context: {
   repo: string;
   dev: string;
   agent: string;
+  bus: BusConfig;
   channelId: string;
   repoCommsPath: string | null;
   source: string;
 }): Record<string, unknown> {
-  return {
+  const base: Record<string, unknown> = {
     project: context.project,
     repo: context.repo,
     dev: context.dev,
     agent: context.agent,
-    discord: { channelId: context.channelId },
+    bus: context.bus,
     repoCommsPath: context.repoCommsPath,
     source: context.source,
   };
+  if (context.bus.kind === 'discord') {
+    base.discord = { channelId: context.bus.channelId };
+  }
+  return base;
 }
 
 export { getConfigDir, getConfigPath } from './paths.js';

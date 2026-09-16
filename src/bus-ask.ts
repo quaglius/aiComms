@@ -26,7 +26,7 @@ export function buildBusAskEnvelope(
   context?: string,
 ): Envelope {
   const bodyParts = [context, question].filter((part) => part && part.trim().length > 0);
-  const body = bodyParts.join('\n\n').slice(0, 600);
+  const body = bodyParts.join('\n\n').slice(0, 4000);
   const subject = question.replace(/\s+/g, ' ').trim().slice(0, 120);
 
   const input: SendInput = {

@@ -25,7 +25,9 @@ import {
 import { formatDuration, formatRemaining, overlapRemainingMs } from './time.js';
 
 export interface CursorState {
-  lastMessageId: string;
+  lastMessageId?: string;
+  lastSince?: string;
+  etag?: string;
 }
 
 export interface ReadState {

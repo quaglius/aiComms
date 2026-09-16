@@ -5,334 +5,169 @@ user. Follow the steps in order. Do not advance until you have verified the curr
 
 ---
 
-## SECRETS RULE (read this first)
+## v0.5 default: GitHub bus
 
-**NEVER** ask the user to paste the Discord bot token in chat,
-in this thread, or in any message.
+Most new setups use **GitHub as the bus** — no Discord bot, no shared token.
+Identity comes from `gh auth login`.
 
-The token is loaded like this, in the user's terminal (hidden prompt):
-
-```bash
-npx @quaglius/ai-comms secret set <project>
-```
-
-Or, if installed globally:
-
-```bash
-npm install -g @quaglius/ai-comms
-ai-comms secret set <project>
-```
-
-If the user pasted the token in chat anyway:
-
-1. Tell them that token is now **compromised**.
-2. Direct them to the [Discord Developer Portal](https://discord.com/developers/applications), reset the bot token, and generate a new one.
-3. Load the new token with `ai-comms secret set <project>` — never via command-line argument or chat.
-
-**Verify:** confirm you did not write the token to any repo file or in the conversation.
+If the user already has a **v0.4 Discord** setup, skip to
+[Legacy Discord](#legacy-discord-v04) at the end — their config keeps working.
 
 ---
 
-## Step 1 — Create the Discord application (delegate to human)
+## Step 1 — Prerequisites
 
-**You cannot do this yourself.** Ask the user to:
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create an application.
-2. Under **Bot**, create a bot and enable **MESSAGE CONTENT INTENT**.
-3. Copy the **Application ID** (not the token yet).
-4. Invite the bot with this URL (replace `APP_ID`):
-
-```
-https://discord.com/api/oauth2/authorize?client_id=APP_ID&permissions=68608&scope=bot
-```
-
-`68608` = VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY.
-
-5. Under **OAuth2 → General**, leave **Redirects** empty. It is not used.
-
-**Verify before continuing:** the bot appears in the server member list (offline is fine).
-
-**If it fails:** without the bot on the server, `doctor` will report `Channel: inaccessible. Check channelId and bot permissions.`
-
----
-
-## Step 2 — Get the channel ID (delegate to human)
-
-Ask the user to:
-
-1. Enable **Developer Mode** in Discord (Settings → Advanced → Developer Mode).
-2. Right-click the `#ai-bus` channel (or chosen channel) → **Copy Channel ID**.
-
-**Verify:** the ID is a 17–20 digit number.
-
-**If it fails:** a short ID or one with letters will make `doctor` report "Channel inaccessible".
-
----
-
-## Step 3 — Install ai-comms and create identity
-
-In the user's terminal:
+In the user's terminal, verify:
 
 ```bash
-npx @quaglius/ai-comms init
+node --version          # ≥ 20
+git remote get-url origin   # github.com/owner/repo
+gh auth status          # logged in
 ```
 
-Answer the prompts:
+**Verify before continuing:** all three succeed.
 
-- `dev`: user's stable slug (e.g. `ana`)
-- `agent`: tool you're using (e.g. `claude-code`, `cursor`, `codex`, `gemini-cli`)
-- `project`: team/project name (e.g. `acme`)
-- `channelId`: the ID copied in step 2
-
-**Verify:** `~/.ai-comms/config.json` exists with `version: 2` and **no** `token` field.
-
-```bash
-# On Unix/macOS/Git Bash:
-grep -i token ~/.ai-comms/config.json && echo "ERROR: token in config" || echo "OK"
-```
-
-**If it fails:** if `init` aborts, check that Node is ≥ 22 (`node --version`).
+**If `gh auth status` fails:** run `gh auth login` — do not continue until it passes.
 
 ---
 
-## Step 4 — Load the token (hidden prompt)
+## Step 2 — Run setup (no required prompts)
+
+Inside the project repo:
 
 ```bash
-npx @quaglius/ai-comms secret set <project>
+npx @quaglius/ai-comms setup
 ```
 
-Replace `<project>` with the name chosen in `init` (e.g. `acme`).
+`setup` automatically:
 
-**Verify:** the command finishes without error. The token is in `~/.ai-comms/secrets.json`, not in the repo.
+- reads `origin` and repo name
+- uses `gh auth token` for identity
+- finds or creates an issue labeled `ai-comms-bus`
+- writes `.ai-comms.json`, `.mcp.json`, and instruction blocks
+- offers daemon auto-start
+- runs `doctor`
 
-**If it fails:** "Empty token" → the user cancelled; run the command again.
+Optional prompts (all have defaults): create bus issue if missing, install daemon.
+
+**Verify:**
+
+- `.ai-comms.json` exists with `bus.kind: "github"` — **no tokens**
+- `doctor` prints `Diagnostics OK.`
+- `dev` in doctor output matches the user's GitHub login
+
+```bash
+grep -i token .ai-comms.json && echo "ERROR" || echo "OK"
+```
+
+Commit `.ai-comms.json` and `.mcp.json`.
 
 ---
 
-## Step 5 — Link each repo (`link`)
+## Step 3 — Configure MCP
 
-In **each** project repo:
+Follow [`INSTALL.md`](INSTALL.md) for the user's tool.
 
-```bash
-cd /path/to/repo
-npx @quaglius/ai-comms link
-```
-
-- `project`: from step 3 (default: `defaultProject`)
-- `repo`: repo name (default: directory basename)
-
-By default, `link` also offers to write an ai-comms instruction block into
-`CLAUDE.md` (and `AGENTS.md` if present), between `<!-- ai-comms:start -->` and
-`<!-- ai-comms:end -->`. This tells the agent to use `bus_ask` before guessing
-about other repos. Skip with `--no-instructions`.
-
-**Verify:** `.ai-comms.json` was created at the repo root with `project`, `repo`, and `discord.channelId`. **No token.**
-
-```bash
-cat .ai-comms.json
-```
-
-**If it fails:** ".ai-comms.json already exists" → the repo is already linked; do not overwrite it.
-
-Commit `.ai-comms.json` so the team can use it.
+**Verify:** `bus_whoami` returns `dev`, `project`, `repo`, `transport`, and
+`authenticated: true`.
 
 ---
 
-## Step 6 — Diagnostics (`doctor`)
+## Step 4 — Daemon
 
-From any linked repo:
-
-```bash
-npx @quaglius/ai-comms doctor
-```
-
-**Verify:** output includes:
-
-- `Bot: <username> ✓`
-- `Channel: #<name> ✓`
-- `Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓`
-- `autoAnswer: disabled (default)` or `enabled` with limits
-- `Diagnostics OK.`
-
-**If it fails:**
-
-| Error | Action |
-|---|---|
-| Bot not authenticating | Invalid or reset token → run `secret set` again |
-| Channel inaccessible | Wrong channelId or bot not invited |
-| Missing permissions | Re-invite with `permissions=68608` or adjust channel overwrites |
-
----
-
-## Step 7 — Configure the MCP server in the agent
-
-Follow [`INSTALL.md`](INSTALL.md) for the user's tool (Claude Code, Cursor, Codex, or Gemini CLI).
-
-**Verify:** the agent lists the `bus_whoami` tool. Run it and confirm it returns `dev`, `project`, `repo`, and `repoCommsPath`.
-
-**If it fails:** MCP not connecting → check that `npx @quaglius/ai-comms mcp` runs without error in the terminal.
-
----
-
-## Step 8 — Start the daemon
-
-Test the daemon first:
+Test:
 
 ```bash
 npx @quaglius/ai-comms daemon
 ```
 
-Leave it running while you verify. Send a test message on the channel (or publish
-a claim via `bus_send`) and confirm the log updates.
+Publish a test claim via `bus_send` and confirm
+`~/.ai-comms/projects/<project>/log.jsonl` updates.
 
-**Verify:** `~/.ai-comms/projects/<project>/log.jsonl` updates when a message
-arrives on the channel.
-
-**If it fails:** without the daemon, the inbox may be stale (the MCP warns if the log is >5 min old).
-
-### Step 8b — Make the daemon permanent (delegate OS-specific steps)
-
-The daemon must run on every machine that uses the bus. Ask the user to pick
-their OS and follow the matching section in [`README.md`](../README.md#run-the-daemon-permanently).
-Summarize for them:
-
-**Windows (no admin required):** create a `.vbs` file in the Startup folder
-(`Win+R` → `shell:startup`) that runs `ai-comms daemon` hidden. This avoids
-needing administrator privileges.
-
-**macOS:** create a LaunchAgent plist in `~/Library/LaunchAgents/` with
-`ProgramArguments` pointing to `ai-comms daemon`, then `launchctl load` it.
-
-**Linux:** create a systemd user service at
-`~/.config/systemd/user/ai-comms-daemon.service` with `ExecStart` pointing to
-`ai-comms daemon` (or `npx @quaglius/ai-comms daemon`), then
-`systemctl --user enable --now ai-comms-daemon.service`.
-
-**Verify before continuing:** after a login or reboot, incoming channel messages
-still update `log.jsonl` without manually starting the daemon.
-
-**If it fails:** check that the binary path in the startup script is absolute
-and on PATH at login (`which ai-comms`). On Linux, ensure lingering is enabled
-if the user needs the daemon when not logged in:
-`loginctl enable-linger <username>`.
+If the user accepted daemon install during setup, verify it survives a reboot.
+Otherwise, delegate OS-specific steps from [`README.md`](../README.md#run-the-daemon-permanently).
 
 ---
 
-## Step 9 — Onboard a teammate
+## Step 5 — Teammate onboarding
 
-`.ai-comms.json` is committed to git, so a teammate gets `project`, `repo`, and
-`channelId` from the clone. They do **not** run `link`.
-
-On the teammate's machine:
+Teammate clones the repo and runs:
 
 ```bash
-git clone <repo-url>
-cd <repo>
+npx @quaglius/ai-comms setup
+```
 
-npx @quaglius/ai-comms init          # only if ~/.ai-comms/config.json does not exist
-npx @quaglius/ai-comms join .
+No `join` command — setup detects the committed `.ai-comms.json`.
+
+**Verify:** teammate's `doctor` passes with their own GitHub `dev` and the same
+bus issue.
+
+---
+
+## Step 6 — End-to-end verification
+
+With two developers and daemons running:
+
+1. **A** publishes a claim via `bus_send`.
+2. **B** runs `bus_claims` and sees A's claim with the correct `repo`.
+3. **B**'s `from.dev` on the claim matches A's GitHub login (not a forged slug).
+
+---
+
+## Optional: Discord webhook notifier
+
+If the user wants desktop-adjacent alerts in Discord (one-way, no bot):
+
+1. Human creates an **incoming webhook** on a channel (Integrations → Webhooks).
+2. Store URL in secrets (never in chat):
+
+```bash
+# edit ~/.ai-comms/secrets.json — or use your project's secret tooling
+```
+
+3. Add to `.ai-comms.json`:
+
+```json
+"notifiers": [{ "kind": "discord-webhook", "urlRef": "secrets:<project>.discordWebhook" }]
+```
+
+**Verify:** after `bus_send`, the webhook channel shows a **single readable line**
+(no ```json block).
+
+---
+
+## SECRETS RULE
+
+**NEVER** ask the user to paste tokens in chat.
+
+- **GitHub:** uses `gh` — nothing to paste for the bus.
+- **Discord legacy bot token:** `ai-comms secret set <project>` (hidden prompt).
+- **Discord webhook URL:** goes in `secrets.json`, not `.ai-comms.json`.
+
+---
+
+## Legacy Discord (v0.4)
+
+If `.ai-comms.json` has `discord.channelId` (no `bus`), the v0.4 flow still works:
+
+```bash
+npx @quaglius/ai-comms init
 npx @quaglius/ai-comms secret set <project>
+npx @quaglius/ai-comms link
 npx @quaglius/ai-comms doctor
 ```
 
-During `init`, the teammate picks their own `dev` slug and `agent`. The
-`project` name must match the team's.
-
-They also need:
-
-1. MCP configured per [`INSTALL.md`](INSTALL.md) (step 7).
-2. The daemon running permanently (step 8b) on their machine.
-
-**Verify:** `doctor` passes with their own `dev` and the same `project` /
-`channelId` as the rest of the team.
-
-**If it fails:**
-
-| Error | Action |
-|---|---|
-| `Could not find .ai-comms.json` | Wrong directory, or file not committed/pushed |
-| `Run "ai-comms init" first` | Teammate skipped `init` |
-| `No token for project` | Teammate skipped `secret set` |
-| Teammate's inbox is empty/stale | Teammate's daemon is not running |
+`doctor` will warn that Discord does not authenticate identity. Suggest
+`ai-comms setup` when the user is ready to migrate.
 
 ---
 
-## Step 10 — End-to-end verification
-
-With two devs (A and B) and the daemon running on both machines:
-
-1. **A** publishes a claim from their repo:
-
-   ```
-   bus_send({ type: "claim", subject: "test claim", refs: { paths: ["src/test/**"], until: "<ISO+24h>" } })
-   ```
-
-2. **B** runs `bus_claims` and sees A's claim with the correct `repo`.
-
-3. **A** runs `bus_claims` from **another repo** in the same project and sees the same thing.
-
-**Verify:**
-
-- The claim appears on both sides with the same `id`.
-- A's `bus_send` reports `repo=<repo-name-from-cwd>`.
-- Each side's `bus_whoami` shows the correct `.ai-comms.json`.
-
-**If it fails:**
-
-- B doesn't see the claim → B's daemon is down or token/channel is wrong.
-- Wrong `repo` → missing `link` in that repo or wrong cwd.
-
----
-
-## Step 11 — v0.3 cross-repo Q&A (optional)
-
-### Enable headless auto-answer (opt-in)
-
-Auto-answer is **off by default**. To let the daemon reply to directed `ask` /
-`need` messages without a human in the loop, add to the project in
-`~/.ai-comms/config.json`:
-
-```json
-"autoAnswer": {
-  "enabled": true,
-  "maxPerRequesterPerHour": 5,
-  "timeoutSeconds": 120,
-  "maxAgeMinutes": 10,
-  "repoPath": "/path/to/dir/containing/your/repos"
-}
-```
-
-**Verify:** `ai-comms doctor` reports `autoAnswer: enabled`.
-
-**Security:** only `claude-code` and `cursor` are supported; both launch in
-read-only mode. Other agents are never launched automatically.
-
-### Test `bus_ask`
-
-From a linked repo with MCP connected:
-
-```
-bus_ask({ question: "Is feature X implemented on your side?", to: ["beto"] })
-```
-
-**Verify:** with autoAnswer enabled on beto's machine and daemon running, an
-`answer` appears on the channel with `reply_to` pointing at the ask.
-
-Check budget usage: `ai-comms budget`.
-
----
-
-## Quick reference commands
+## Quick reference
 
 | Command | Usage |
 |---|---|
-| `init` | First-time setup (identity + project) |
-| `link [--no-instructions]` | Create `.ai-comms.json` in the current repo |
-| `join <path>` | Register a cloned repo |
-| `secret set <project>` | Save token (hidden prompt) |
-| `doctor [--project p]` | Full diagnostics |
-| `budget [--project p]` | Auto-answer budget for the current hour |
-| `daemon [--verbose]` | Listen on all projects |
+| `setup` | Configure repo for GitHub bus (default) |
+| `doctor` | Diagnostics |
+| `daemon` | Poll bus and update local log |
 | `mcp` | MCP stdio server |
-| `inbox [--all] [--project p]` | Inbox in terminal |
-| `claims [--project p]` | Active claims in terminal |
+| `init` / `link` / `secret set` | Legacy Discord only |

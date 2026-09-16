@@ -113,7 +113,7 @@ describe('resolveContext', () => {
       try {
         resolveContext(orphan, config);
       } catch (err) {
-        assert.match(String(err), /ai-comms link/);
+        assert.match(String(err), /ai-comms setup/);
         assert.match(String(err), /--project/);
       }
     });

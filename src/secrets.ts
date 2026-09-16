@@ -1,7 +1,13 @@
 import { chmodSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { getConfigDir, getSecretsPath } from './paths.js';
 
-export type SecretsFile = Record<string, { token: string }>;
+export type ProjectSecrets = {
+  token?: string;
+  discordWebhook?: string;
+  [key: string]: string | undefined;
+};
+
+export type SecretsFile = Record<string, ProjectSecrets>;
 
 export function projectTokenEnvKey(project: string): string {
   return `AI_COMMS_TOKEN_${project.replace(/-/g, '_').toUpperCase()}`;
@@ -89,4 +95,29 @@ export function tokenSourceLabel(
     case 'secrets':
       return '[secrets.json]';
   }
+}
+
+export function resolveSecretRef(urlRef: string, project: string, secretsPath = getSecretsPath()): string {
+  const prefix = 'secrets:';
+  if (!urlRef.startsWith(prefix)) {
+    throw new SecretsError(`Invalid secret ref "${urlRef}". Expected secrets:<project>.<key>.`);
+  }
+
+  const path = urlRef.slice(prefix.length);
+  const [refProject, ...rest] = path.split('.');
+  const key = rest.join('.');
+  if (!refProject || !key) {
+    throw new SecretsError(`Invalid secret ref "${urlRef}". Expected secrets:<project>.<key>.`);
+  }
+
+  const targetProject = refProject === project ? project : refProject;
+  const secrets = loadSecrets(secretsPath);
+  const entry = secrets[targetProject];
+  const value = entry?.[key]?.trim();
+  if (!value) {
+    throw new SecretsError(
+      `Missing secret "${key}" for project "${targetProject}" (ref ${urlRef}).`,
+    );
+  }
+  return value;
 }

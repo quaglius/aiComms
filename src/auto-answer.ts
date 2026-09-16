@@ -1,6 +1,8 @@
 import type { ConfigV2, ProjectConfig } from './config.js';
 import { resolveAutoAnswer } from './config.js';
-import { sendEnvelope } from './discord.js';
+import { createTransport } from './transports/index.js';
+import { createNotifiers } from './notifiers/index.js';
+import { resolveContext } from './context.js';
 import type { Envelope } from './envelope.js';
 import { createEnvelope, isExpired, isHopsBlocked } from './envelope.js';
 import {
@@ -11,7 +13,6 @@ import {
 } from './agent-cli.js';
 import { isBudgetAvailable, recordBudgetUse } from './budget.js';
 import { loadLog, appendEnvelope } from './store.js';
-import { getEffectiveToken } from './secrets.js';
 
 export interface AutoAnswerDecision {
   trigger: boolean;
@@ -97,8 +98,8 @@ export function gatherBusContext(log: Envelope[], limit = 10): string {
     .join('\n');
 }
 
-/** Envelope bodies are capped at 600 chars; leave room so the answer is not cut. */
-const ANSWER_BUDGET_CHARS = 500;
+/** Leave room so the answer is not cut by the transport render budget. */
+const ANSWER_BUDGET_CHARS = 3500;
 
 export function buildAutoAnswerPrompt(envelope: Envelope, log: Envelope[]): string {
   const busContext = gatherBusContext(log);
@@ -133,8 +134,7 @@ export function hasExistingAnswer(log: Envelope[], askId: string): boolean {
 export interface AutoAnswerDeps {
   logFn?: (project: string) => Envelope[];
   appendFn?: typeof appendEnvelope;
-  sendFn?: typeof sendEnvelope;
-  getTokenFn?: typeof getEffectiveToken;
+  sendFn?: (envelope: Envelope, project: string, config: ConfigV2) => Promise<void>;
   runAgentFn?: (
     spec: AgentLaunchSpec,
     timeoutMs: number,
@@ -150,8 +150,8 @@ export async function runAutoAnswer(
   logMessage: (message: string) => void,
   deps: AutoAnswerDeps = {},
 ): Promise<void> {
-  const dev = config.identity.dev;
-  const agent = config.identity.agent;
+  const dev = config.identity?.dev ?? '';
+  const agent = config.agent ?? config.identity?.agent ?? 'claude-code';
   const projectConfig = config.projects[project];
   const autoAnswer = resolveAutoAnswer(projectConfig);
 
@@ -238,7 +238,7 @@ export async function runAutoAnswer(
       subject: `re: ${envelope.subject}`.slice(0, 120),
       // Mark the cut: a silently truncated answer reads as a complete one, and
       // the asker acts on half an answer without knowing the rest existed.
-      body: text.length > 600 ? text.slice(0, 585) + ' […cut]' : text,
+      body: text.length > 4000 ? text.slice(0, 3985) + ' […cut]' : text,
       to: [envelope.from.dev],
       reply_to: envelope.id,
     },
@@ -246,14 +246,21 @@ export async function runAutoAnswer(
     { hops: envelope.hops + 1 },
   );
 
-  const sendFn = deps.sendFn ?? sendEnvelope;
-  const getTokenFn = deps.getTokenFn ?? getEffectiveToken;
+  const sendFn =
+    deps.sendFn ??
+    (async (envelope, proj, cfg) => {
+      const repoPath = projectConfig?.repos?.[0]?.path ?? process.cwd();
+      const ctx = resolveContext(repoPath, cfg, { projectOverride: proj });
+      const transport = createTransport(ctx, cfg);
+      await transport.send(envelope);
+      for (const notifier of createNotifiers(ctx.notifiers, proj)) {
+        await notifier.notify(envelope);
+      }
+    });
   const appendFn = deps.appendFn ?? appendEnvelope;
 
   try {
-    const { token } = getTokenFn(project);
-    const channelId = projectConfig!.discord.channelId;
-    await sendFn(answer, channelId, token);
+    await sendFn(answer, project, config);
     appendFn(answer, project);
     (deps.recordBudgetFn ?? recordBudgetUse)(project, envelope.from.dev);
     logMessage(`auto-answer published ${answer.id} for ${envelope.id}`);
