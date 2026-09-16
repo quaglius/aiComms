@@ -88,7 +88,11 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
     envelope.to.includes(dev) &&
     !envelope.to.includes('*');
 
-  const title = `${envelope.type} · ${envelope.from.dev}/${envelope.from.agent}`;
+  // Prefix with the tool name: on Windows the toast is delivered by SnoreToast
+  // and shows *its* name, not ours, so the title is the only place the user can
+  // tell where the notification came from. A notification you don't recognise
+  // is a notification you ignore.
+  const title = `ai-comms · ${envelope.type} · ${envelope.from.dev}/${envelope.from.agent}`;
   const message = envelope.subject;
 
   try {
