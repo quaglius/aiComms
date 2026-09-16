@@ -276,7 +276,13 @@ describe('unsupported agent CLI', () => {
     const spec = buildReadOnlyAgentSpec('claude-code', 'answer this', '/repo');
     assert.ok(!('error' in spec));
     if (!('error' in spec)) {
-      assert.deepEqual(spec.launch.args, ['-p', '--allowedTools', 'Read,Grep,Glob']);
+      assert.deepEqual(spec.launch.args.slice(0, 3), ['-p', '--allowedTools', 'Read,Grep,Glob']);
+      assert.equal(spec.launch.args[3], '--disallowedTools');
+      // Read-only stops the answerer writing; it does nothing to stop it
+      // disclosing, and the answer is published to the channel.
+      for (const secret of ['Read(**/.env)', 'Grep(**/.env)', 'Read(**/*credential*)', 'Read(**/.ssh/**)']) {
+        assert.ok(spec.launch.args.includes(secret), `falta la denegación ${secret}`);
+      }
       assert.equal(spec.launch.stdin, 'answer this');
       assert.ok(
         !spec.launch.args.includes('answer this'),
@@ -285,17 +291,10 @@ describe('unsupported agent CLI', () => {
     }
   });
 
-  it('launches cursor with ask mode (read-only)', () => {
+  it('refuses cursor: it cannot deny reads, and answers are published', () => {
     const spec = buildReadOnlyAgentSpec('cursor', 'answer this', '/repo');
-    assert.ok(!('error' in spec));
-    if (!('error' in spec)) {
-      assert.deepEqual(spec.launch.args, ['-p', '--mode', 'ask']);
-      assert.equal(spec.launch.stdin, 'answer this');
-      assert.ok(
-        !spec.launch.args.includes('answer this'),
-        'el prompt es texto de un tercero: nunca en argv',
-      );
-    }
+    assert.ok('error' in spec);
+    assert.equal(isReadOnlyAgentSupported('cursor'), false);
   });
 });
 

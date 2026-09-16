@@ -29,8 +29,51 @@ export interface UnsupportedAgent {
 
 export type AgentSpecResult = ReadOnlyAgentSpec | UnsupportedAgent;
 
+/**
+ * Paths the answerer must never read.
+ *
+ * Read-only stops the answerer changing your repo; it does nothing to stop it
+ * *disclosing*. Its reply is published to a channel, so anyone who can post an
+ * ask — anyone holding the shared bot token — could otherwise ask for your
+ * `.env` and read the answer off the bus. Deny rules cover Grep as well as
+ * Read, so content cannot be lifted out with a search instead of an open.
+ *
+ * This list is deliberately broad and deliberately not configurable: a project
+ * that needs one of these paths to answer a question is asking the wrong
+ * question.
+ */
+const SECRET_PATH_DENIES = [
+  '**/.env',
+  '**/.env.*',
+  '**/*.env',
+  '**/secrets*',
+  '**/*secret*',
+  '**/*credential*',
+  '**/*.pem',
+  '**/*.key',
+  '**/*.p12',
+  '**/*.pfx',
+  '**/id_rsa*',
+  '**/id_ed25519*',
+  '**/.npmrc',
+  '**/.netrc',
+  '**/.git-credentials',
+  '**/.aws/**',
+  '**/.ssh/**',
+  '**/.gnupg/**',
+  '**/.ai-comms/**',
+];
+
+function secretDenyRules(): string[] {
+  const rules: string[] = [];
+  for (const glob of SECRET_PATH_DENIES) {
+    rules.push(`Read(${glob})`, `Grep(${glob})`, `Glob(${glob})`);
+  }
+  return rules;
+}
+
 export function isReadOnlyAgentSupported(agent: string): boolean {
-  return agent === 'claude-code' || agent === 'cursor';
+  return agent === 'claude-code';
 }
 
 export function buildReadOnlyAgentSpec(
@@ -43,21 +86,22 @@ export function buildReadOnlyAgentSpec(
       return {
         launch: {
           command: 'claude',
-          args: ['-p', '--allowedTools', 'Read,Grep,Glob'],
+          args: ['-p', '--allowedTools', 'Read,Grep,Glob', '--disallowedTools', ...secretDenyRules()],
           cwd,
           stdin: prompt,
         },
-        restriction: '--allowedTools Read,Grep,Glob',
+        restriction: `--allowedTools Read,Grep,Glob with ${SECRET_PATH_DENIES.length} secret path denies`,
       };
     case 'cursor':
+      // `cursor-agent --mode ask` will not write, but it exposes no way to deny
+      // reads of specific paths, so a crafted question could still walk out of
+      // the repo with a .env and have the answer published to the channel.
+      // Not writing is not enough: the answer is broadcast. Until there is a
+      // real path restriction, this agent does not answer automatically.
       return {
-        launch: {
-          command: 'cursor-agent',
-          args: ['-p', '--mode', 'ask'],
-          cwd,
-          stdin: prompt,
-        },
-        restriction: '--mode ask (read-only)',
+        error:
+          'cursor-agent cannot restrict which paths are read, and auto-answers are published to ' +
+          'the channel. Auto-answer stays off for this agent; asking and reading the bus still work.',
       };
     default:
       return { error: `Unsupported agent "${agent}" for read-only auto-answer` };

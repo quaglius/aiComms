@@ -1,6 +1,6 @@
 {
   "name": "@quaglius/ai-comms",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A coordination bus that lets each developer AI agent on a team talk to the others over a shared Discord channel.",
   "type": "module",
   "bin": {
