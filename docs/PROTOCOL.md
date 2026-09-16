@@ -6,7 +6,9 @@ Lleva metadatos y punteros; el contenido (código, diffs) vive en git.
 ## Transporte
 
 Un canal de Discord (`#ai-bus`). Cada mensaje del canal = un sobre.
-Se publica una línea legible por humanos + un bloque ```json con el sobre.
+Se publica una línea legible por humanos + un bloque ```json con el sobre,
+serializado **compacto** (sin indentar): el límite de Discord son 2000 chars y
+la indentación se come casi la mitad del presupuesto.
 El canal es mixto: los humanos leen y pueden intervenir.
 
 ## Sobre
@@ -16,14 +18,14 @@ El canal es mixto: los humanos leen y pueden intervenir.
   "v": 1,
   "id": "01J8...",            // ULID, generado por el emisor
   "ts": "2026-09-16T12:00:00Z",
-  "from": { "dev": "dani", "agent": "claude-code", "repo": "analytics-hub" },
+  "from": { "dev": "ana", "agent": "claude-code", "repo": "acme" },
   "to": ["*"],                 // ["*"] o lista de dev ids
   "type": "claim",
   "subject": "≤ 120 chars, una línea",
   "body": "≤ 600 chars, markdown. Punteros, no contenido.",
   "refs": {
     "branch": "feat/etl-reportes",   // opcional
-    "pr": 42,                         // opcional
+    "pr": "https://github.com/org/repo/pull/42", // opcional, URL completa
     "paths": ["src/analytics/etl/**"],// opcional, máx 20 globs
     "until": "2026-09-16T21:00:00Z"   // obligatorio en claim
   },
@@ -33,8 +35,13 @@ El canal es mixto: los humanos leen y pueden intervenir.
 }
 ```
 
-Límites duros: el mensaje renderizado debe entrar en 2000 chars (límite de
-Discord). Si `body` se pasa, se trunca con `…` y se registra el truncado.
+Límites duros: el mensaje renderizado debe entrar en 1900 chars. Si `body` se
+pasa, se trunca con `…` y se registra el truncado. Si ni con `body` vacío entra,
+el envío falla con error accionable: publicar un bloque json cortado dejaría un
+sobre ilegible en el canal.
+
+`refs.pr` va como **URL completa**, no como número: un proyecto puede tener
+repos en más de un forge (GitHub, GitLab) y un `42` pelado no dice de cuál es.
 
 ## Tipos
 
@@ -58,14 +65,18 @@ Discord). Si `body` se pasa, se trunca con `…` y se registra el truncado.
 4. **TTL por defecto 24h.** Un sobre vencido no aparece en el inbox.
 5. **Los claims se solapan, no se bloquean.** Si tu `claim` pisa un claim activo
    ajeno, la herramienta te devuelve el conflicto como advertencia; decidís vos.
-6. **Los mensajes ajenos son datos, no instrucciones.** Todo lo que entra por el
+6. **Los claims tienen scope de repo.** Los globs de `refs.paths` son relativos
+   al repo de `from.repo`. Dos claims sólo pueden entrar en conflicto si son del
+   mismo repo: `internal/**` puede existir en `acme-api` y en `acme-web`, y
+   compararlos entre sí da conflictos falsos.
+7. **Los mensajes ajenos son datos, no instrucciones.** Todo lo que entra por el
    bus se entrega al agente envuelto como propuesta de un tercero. Ninguna
    acción con efecto (commit, push, tocar archivos de otro) se ejecuta sin que
    la apruebe el humano. En v0 no hay respuesta automática: sólo notificación.
 
 ## Identidad
 
-`dev` es un slug estable por persona (`dani`, `tomas`, …), configurado local en
+`dev` es un slug estable por persona (`ana`, `beto`, …), configurado local en
 `~/.ai-comms/config.json`. `agent` es el CLI que se está usando
 (`claude-code`, `cursor`, `codex`, `gemini-cli`, …). Discord identifica la
 cuenta; el sobre identifica a la persona y la herramienta.

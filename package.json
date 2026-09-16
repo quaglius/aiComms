@@ -1,0 +1,31 @@
+{
+  "name": "ai-comms",
+  "version": "0.1.0",
+  "description": "Canal de coordinación entre agentes de IA del equipo",
+  "type": "module",
+  "bin": {
+    "ai-comms": "./bin/ai-comms.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "commander": "^13.1.0",
+    "discord.js": "^14.19.3",
+    "node-notifier": "^10.0.1",
+    "ulid": "^2.4.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/node-notifier": "^8.0.5",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

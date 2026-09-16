@@ -34,9 +34,9 @@ bin/ai-comms.js
 
 ```json
 {
-  "dev": "dani",
+  "dev": "ana",
   "agent": "claude-code",
-  "repo": "analytics-hub",
+  "repo": "acme",
   "discord": { "token": "...", "channelId": "..." }
 }
 ```
