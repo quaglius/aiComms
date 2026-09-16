@@ -1,40 +1,46 @@
-# Setup de ai-comms — guía para el agente
+# ai-comms setup — agent guide
 
-Este documento está escrito para **vos**, el agente de IA que está configurando
-ai-comms para tu usuario. Seguí los pasos en orden. No avances al siguiente hasta
-verificar el actual.
+This document is written for **you**, the AI agent configuring ai-comms for your
+user. Follow the steps in order. Do not advance until you have verified the current one.
 
 ---
 
-## REGLA DE SECRETOS (leé esto primero)
+## SECRETS RULE (read this first)
 
-**NUNCA** pidas al usuario que pegue el token del bot de Discord en el chat,
-ni en este hilo, ni en ningún mensaje.
+**NEVER** ask the user to paste the Discord bot token in chat,
+in this thread, or in any message.
 
-El token se carga así, en la terminal del usuario (prompt oculto):
+The token is loaded like this, in the user's terminal (hidden prompt):
 
 ```bash
-npx github:quaglius/aiComms secret set <project>
+npx @quaglius/ai-comms secret set <project>
 ```
 
-Si el usuario pegó el token en el chat de todas formas:
+Or, if installed globally:
 
-1. Decile que ese token quedó **comprometido**.
-2. Indicale que vaya al [Discord Developer Portal](https://discord.com/developers/applications), resetee el token del bot y genere uno nuevo.
-3. Cargá el token nuevo con `ai-comms secret set <project>` — nunca por argumento de línea de comandos ni por chat.
+```bash
+npm install -g @quaglius/ai-comms
+ai-comms secret set <project>
+```
 
-**Verificar:** confirmá que no escribiste el token en ningún archivo del repo ni en la conversación.
+If the user pasted the token in chat anyway:
+
+1. Tell them that token is now **compromised**.
+2. Direct them to the [Discord Developer Portal](https://discord.com/developers/applications), reset the bot token, and generate a new one.
+3. Load the new token with `ai-comms secret set <project>` — never via command-line argument or chat.
+
+**Verify:** confirm you did not write the token to any repo file or in the conversation.
 
 ---
 
-## Paso 1 — Crear la aplicación de Discord (delegar al humano)
+## Step 1 — Create the Discord application (delegate to human)
 
-**No podés hacer esto vos.** Pedile al usuario que:
+**You cannot do this yourself.** Ask the user to:
 
-1. Entre a [Discord Developer Portal](https://discord.com/developers/applications) y cree una aplicación.
-2. En **Bot**, cree un bot y active **MESSAGE CONTENT INTENT**.
-3. Copie el **Application ID** (no el token todavía).
-4. Invite el bot con esta URL (reemplazá `APP_ID`):
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create an application.
+2. Under **Bot**, create a bot and enable **MESSAGE CONTENT INTENT**.
+3. Copy the **Application ID** (not the token yet).
+4. Invite the bot with this URL (replace `APP_ID`):
 
 ```
 https://discord.com/api/oauth2/authorize?client_id=APP_ID&permissions=68608&scope=bot
@@ -42,194 +48,194 @@ https://discord.com/api/oauth2/authorize?client_id=APP_ID&permissions=68608&scop
 
 `68608` = VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY.
 
-5. En **OAuth2 → General**, deje **Redirects** vacío. No se usa.
+5. Under **OAuth2 → General**, leave **Redirects** empty. It is not used.
 
-**Verificar antes de continuar:** el bot aparece en la lista de miembros del servidor (offline está bien).
+**Verify before continuing:** the bot appears in the server member list (offline is fine).
 
-**Si falla:** sin bot en el servidor, `doctor` reportará "guild membership" o canal inaccesible.
-
----
-
-## Paso 2 — Obtener el channel ID (delegar al humano)
-
-Pedile al usuario que:
-
-1. Active **Modo desarrollador** en Discord (Ajustes → Avanzado → Modo desarrollador).
-2. Haga clic derecho sobre el canal `#ai-bus` (o el canal elegido) → **Copiar ID del canal**.
-
-**Verificar:** el ID es un número de 17–20 dígitos.
-
-**Si falla:** un ID corto o con letras hará que `doctor` reporte "Canal inaccesible".
+**If it fails:** without the bot on the server, `doctor` will report "guild membership" or an inaccessible channel.
 
 ---
 
-## Paso 3 — Instalar ai-comms y crear identidad
+## Step 2 — Get the channel ID (delegate to human)
 
-En la terminal del usuario:
+Ask the user to:
 
-```bash
-npx github:quaglius/aiComms init
-```
+1. Enable **Developer Mode** in Discord (Settings → Advanced → Developer Mode).
+2. Right-click the `#ai-bus` channel (or chosen channel) → **Copy Channel ID**.
 
-Respondé los prompts:
+**Verify:** the ID is a 17–20 digit number.
 
-- `dev`: slug estable del usuario (ej. `ana`)
-- `agent`: herramienta que usás (ej. `claude-code`, `cursor`, `codex`, `gemini-cli`)
-- `project`: nombre del equipo/proyecto (ej. `acme`)
-- `channelId`: el ID copiado en el paso 2
-
-**Verificar:** existe `~/.ai-comms/config.json` con `version: 2` y **sin** campo `token`.
-
-```bash
-# En Unix/macOS/Git Bash:
-grep -i token ~/.ai-comms/config.json && echo "ERROR: hay token en config" || echo "OK"
-```
-
-**Si falla:** si `init` aborta, revisá que Node sea ≥ 22 (`node --version`).
+**If it fails:** a short ID or one with letters will make `doctor` report "Channel inaccessible".
 
 ---
 
-## Paso 4 — Cargar el token (prompt oculto)
+## Step 3 — Install ai-comms and create identity
+
+In the user's terminal:
 
 ```bash
-npx github:quaglius/aiComms secret set <project>
+npx @quaglius/ai-comms init
 ```
 
-Reemplazá `<project>` por el nombre elegido en `init` (ej. `acme`).
+Answer the prompts:
 
-**Verificar:** el comando termina sin error. El token quedó en `~/.ai-comms/secrets.json`, no en el repo.
+- `dev`: user's stable slug (e.g. `ana`)
+- `agent`: tool you're using (e.g. `claude-code`, `cursor`, `codex`, `gemini-cli`)
+- `project`: team/project name (e.g. `acme`)
+- `channelId`: the ID copied in step 2
 
-**Si falla:** "Token vacío" → el usuario canceló; repetir el comando.
+**Verify:** `~/.ai-comms/config.json` exists with `version: 2` and **no** `token` field.
+
+```bash
+# On Unix/macOS/Git Bash:
+grep -i token ~/.ai-comms/config.json && echo "ERROR: token in config" || echo "OK"
+```
+
+**If it fails:** if `init` aborts, check that Node is ≥ 22 (`node --version`).
 
 ---
 
-## Paso 5 — Vincular cada repo (`link`)
-
-En **cada** repo del proyecto:
+## Step 4 — Load the token (hidden prompt)
 
 ```bash
-cd /ruta/al/repo
-npx github:quaglius/aiComms link
+npx @quaglius/ai-comms secret set <project>
 ```
 
-- `project`: el del paso 3 (default: el de `defaultProject`)
-- `repo`: nombre del repo (default: basename del directorio)
+Replace `<project>` with the name chosen in `init` (e.g. `acme`).
 
-**Verificar:** se creó `.ai-comms.json` en la raíz del repo con `project`, `repo` y `discord.channelId`. **Sin token.**
+**Verify:** the command finishes without error. The token is in `~/.ai-comms/secrets.json`, not in the repo.
+
+**If it fails:** "Empty token" → the user cancelled; run the command again.
+
+---
+
+## Step 5 — Link each repo (`link`)
+
+In **each** project repo:
+
+```bash
+cd /path/to/repo
+npx @quaglius/ai-comms link
+```
+
+- `project`: from step 3 (default: `defaultProject`)
+- `repo`: repo name (default: directory basename)
+
+**Verify:** `.ai-comms.json` was created at the repo root with `project`, `repo`, and `discord.channelId`. **No token.**
 
 ```bash
 cat .ai-comms.json
 ```
 
-**Si falla:** ".ai-comms.json ya existe" → el repo ya está vinculado; no lo sobrescribas.
+**If it fails:** ".ai-comms.json already exists" → the repo is already linked; do not overwrite it.
 
-Commiteá `.ai-comms.json` para que el equipo lo use.
+Commit `.ai-comms.json` so the team can use it.
 
 ---
 
-## Paso 6 — Diagnóstico (`doctor`)
+## Step 6 — Diagnostics (`doctor`)
 
-Desde cualquier repo vinculado:
+From any linked repo:
 
 ```bash
-npx github:quaglius/aiComms doctor
+npx @quaglius/ai-comms doctor
 ```
 
-**Verificar:** salida incluye:
+**Verify:** output includes:
 
 - `Bot: <username> ✓`
-- `Canal: #<nombre> ✓`
-- `Permisos: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓`
-- `Diagnóstico OK.`
+- `Channel: #<name> ✓`
+- `Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓`
+- `Diagnostics OK.`
 
-**Si falla:**
+**If it fails:**
 
-| Error | Acción |
+| Error | Action |
 |---|---|
-| Bot no autentica | Token inválido o reseteado → `secret set` de nuevo |
-| Canal inaccesible | channelId incorrecto o bot no invitado |
-| Permisos faltantes | Reinvitar con `permissions=68608` o ajustar overwrites del canal |
+| Bot not authenticating | Invalid or reset token → run `secret set` again |
+| Channel inaccessible | Wrong channelId or bot not invited |
+| Missing permissions | Re-invite with `permissions=68608` or adjust channel overwrites |
 
 ---
 
-## Paso 7 — Configurar el MCP server en el agente
+## Step 7 — Configure the MCP server in the agent
 
-Seguí [`INSTALL.md`](INSTALL.md) para la herramienta del usuario (Claude Code, Cursor, Codex o Gemini CLI).
+Follow [`INSTALL.md`](INSTALL.md) for the user's tool (Claude Code, Cursor, Codex, or Gemini CLI).
 
-**Verificar:** el agente lista la tool `bus_whoami`. Ejecutala y confirmá que devuelve `dev`, `project`, `repo` y `repoCommsPath`.
+**Verify:** the agent lists the `bus_whoami` tool. Run it and confirm it returns `dev`, `project`, `repo`, and `repoCommsPath`.
 
-**Si falla:** MCP no conecta → revisá que `npx github:quaglius/aiComms mcp` corre sin error en la terminal.
+**If it fails:** MCP not connecting → check that `npx @quaglius/ai-comms mcp` runs without error in the terminal.
 
 ---
 
-## Paso 8 — Arrancar el daemon
+## Step 8 — Start the daemon
 
 ```bash
-npx github:quaglius/aiComms daemon
+npx @quaglius/ai-comms daemon
 ```
 
-Dejalo corriendo en background (tmux, systemd, o terminal dedicada).
+Leave it running in the background (tmux, systemd, or a dedicated terminal).
 
-**Verificar:** al enviar un mensaje de prueba en el canal, `~/.ai-comms/projects/<project>/log.jsonl` se actualiza.
+**Verify:** when a test message is sent on the channel, `~/.ai-comms/projects/<project>/log.jsonl` updates.
 
-**Si falla:** sin daemon, el inbox puede quedar desactualizado (el MCP avisa si el log lleva >5 min sin cambios).
+**If it fails:** without the daemon, the inbox may be stale (the MCP warns if the log is >5 min old).
 
 ---
 
-## Paso 9 — Sumar a un compañero
+## Step 9 — Onboard a teammate
 
-El compañero clona el repo (ya trae `.ai-comms.json`):
+The teammate clones the repo (it already has `.ai-comms.json`):
 
 ```bash
-npx github:quaglius/aiComms init          # solo identidad si no tiene config
-npx github:quaglius/aiComms join /ruta/al/repo
-npx github:quaglius/aiComms secret set <project>
-npx github:quaglius/aiComms doctor
+npx @quaglius/ai-comms init          # identity only if no config yet
+npx @quaglius/ai-comms join /path/to/repo
+npx @quaglius/ai-comms secret set <project>
+npx @quaglius/ai-comms doctor
 ```
 
-**Verificar:** `doctor` verde con su propio `dev` y el mismo `project`/`channelId`.
+**Verify:** `doctor` passes with their own `dev` and the same `project`/`channelId`.
 
-**Si falla:** "No se encontró .ai-comms.json" → clonó el directorio equivocado o el archivo no está commiteado.
+**If it fails:** "Could not find .ai-comms.json" → wrong directory cloned or file not committed.
 
 ---
 
-## Paso 10 — Verificación de punta a punta
+## Step 10 — End-to-end verification
 
-Con dos devs (A y B) y el daemon corriendo en ambas máquinas:
+With two devs (A and B) and the daemon running on both machines:
 
-1. **A** publica un claim desde su repo:
+1. **A** publishes a claim from their repo:
 
    ```
    bus_send({ type: "claim", subject: "test claim", refs: { paths: ["src/test/**"], until: "<ISO+24h>" } })
    ```
 
-2. **B** ejecuta `bus_claims` y ve el claim de A con el `repo` correcto.
+2. **B** runs `bus_claims` and sees A's claim with the correct `repo`.
 
-3. **A** ejecuta `bus_claims` desde **otro repo** del mismo proyecto y ve lo mismo.
+3. **A** runs `bus_claims` from **another repo** in the same project and sees the same thing.
 
-**Verificar:**
+**Verify:**
 
-- El claim aparece en ambos con el mismo `id`.
-- `bus_send` de A reporta `repo=<nombre-del-repo-desde-cwd>`.
-- `bus_whoami` de cada lado muestra el `.ai-comms.json` correcto.
+- The claim appears on both sides with the same `id`.
+- A's `bus_send` reports `repo=<repo-name-from-cwd>`.
+- Each side's `bus_whoami` shows the correct `.ai-comms.json`.
 
-**Si falla:**
+**If it fails:**
 
-- B no ve el claim → daemon de B caído o token/canal incorrecto.
-- `repo` incorrecto → falta `link` en ese repo o cwd equivocado.
+- B doesn't see the claim → B's daemon is down or token/channel is wrong.
+- Wrong `repo` → missing `link` in that repo or wrong cwd.
 
 ---
 
-## Comandos de referencia rápida
+## Quick reference commands
 
-| Comando | Uso |
+| Command | Usage |
 |---|---|
-| `init` | Primera configuración (identidad + proyecto) |
-| `link` | Crea `.ai-comms.json` en el repo actual |
-| `join <ruta>` | Registra un repo clonado |
-| `secret set <project>` | Guarda token (prompt oculto) |
-| `doctor [--project p]` | Diagnóstico completo |
-| `daemon [--verbose]` | Escucha todos los proyectos |
-| `mcp` | Servidor MCP stdio |
-| `inbox [--all] [--project p]` | Inbox en terminal |
-| `claims [--project p]` | Claims activos en terminal |
+| `init` | First-time setup (identity + project) |
+| `link` | Create `.ai-comms.json` in the current repo |
+| `join <path>` | Register a cloned repo |
+| `secret set <project>` | Save token (hidden prompt) |
+| `doctor [--project p]` | Full diagnostics |
+| `daemon [--verbose]` | Listen on all projects |
+| `mcp` | MCP stdio server |
+| `inbox [--all] [--project p]` | Inbox in terminal |
+| `claims [--project p]` | Active claims in terminal |

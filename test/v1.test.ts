@@ -36,7 +36,7 @@ function writeConfig(home: string, data: unknown): void {
 }
 
 describe('resolveContext', () => {
-  it('resuelve desde .ai-comms.json en el cwd', async () => {
+  it('resolves from .ai-comms.json in cwd', async () => {
     await withTempHome(async (home) => {
       const repo = path.join(home, 'repos', 'acme-api');
       mkdirSync(repo, { recursive: true });
@@ -68,7 +68,7 @@ describe('resolveContext', () => {
     });
   });
 
-  it('resuelve desde .ai-comms.json en un ancestro', async () => {
+  it('resolves from .ai-comms.json in an ancestor', async () => {
     await withTempHome(async (home) => {
       const repo = path.join(home, 'repos', 'acme-api');
       const sub = path.join(repo, 'src', 'deep');
@@ -96,7 +96,7 @@ describe('resolveContext', () => {
     });
   });
 
-  it('falla con error accionable si no hay contexto', async () => {
+  it('fails with actionable error when there is no context', async () => {
     await withTempHome(async (home) => {
       writeConfig(home, {
         version: 2,
@@ -119,7 +119,7 @@ describe('resolveContext', () => {
     });
   });
 
-  it('distingue dos repos del mismo proyecto', async () => {
+  it('distinguishes two repos in the same project', async () => {
     await withTempHome(async (home) => {
       const api = path.join(home, 'acme-api');
       const web = path.join(home, 'acme-web');
@@ -157,12 +157,12 @@ describe('resolveContext', () => {
   });
 });
 
-describe('.ai-comms.json malformado', () => {
-  it('da error accionable, no stacktrace', async () => {
+describe('malformed .ai-comms.json', () => {
+  it('returns actionable error, not stack trace', async () => {
     await withTempHome(async (home) => {
       const repo = path.join(home, 'bad-repo');
       mkdirSync(repo, { recursive: true });
-      writeFileSync(path.join(repo, '.ai-comms.json'), '{ no es json');
+      writeFileSync(path.join(repo, '.ai-comms.json'), '{ not json');
 
       const { loadRepoComms, ContextError } = await import('../src/context.js');
       assert.throws(() => loadRepoComms(path.join(repo, '.ai-comms.json')), ContextError);
@@ -170,13 +170,13 @@ describe('.ai-comms.json malformado', () => {
         loadRepoComms(path.join(repo, '.ai-comms.json'));
       } catch (err) {
         assert.ok(!String(err).includes('at '));
-        assert.match(String(err), /JSON válido|inválido/);
+        assert.match(String(err), /valid JSON|invalid/);
       }
     });
   });
 });
 
-describe('precedencia de token', () => {
+describe('token precedence', () => {
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -195,7 +195,7 @@ describe('precedencia de token', () => {
     }
   });
 
-  it('prefiere AI_COMMS_TOKEN_<PROJECT> sobre global y secrets', async () => {
+  it('prefers AI_COMMS_TOKEN_<PROJECT> over global and secrets', async () => {
     await withTempHome(async (home) => {
       const secretsPath = path.join(home, '.ai-comms', 'secrets.json');
       mkdirSync(path.dirname(secretsPath), { recursive: true });
@@ -214,7 +214,7 @@ describe('precedencia de token', () => {
     });
   });
 
-  it('prefiere AI_COMMS_TOKEN sobre secrets.json', async () => {
+  it('prefers AI_COMMS_TOKEN over secrets.json', async () => {
     await withTempHome(async (home) => {
       const secretsPath = path.join(home, '.ai-comms', 'secrets.json');
       mkdirSync(path.dirname(secretsPath), { recursive: true });
@@ -232,7 +232,7 @@ describe('precedencia de token', () => {
     });
   });
 
-  it('usa secrets.json si no hay env', async () => {
+  it('uses secrets.json when no env vars are set', async () => {
     await withTempHome(async (home) => {
       const secretsPath = path.join(home, '.ai-comms', 'secrets.json');
       mkdirSync(path.dirname(secretsPath), { recursive: true });
@@ -248,7 +248,7 @@ describe('precedencia de token', () => {
     });
   });
 
-  it('convierte guiones del proyecto a underscore en env var', async () => {
+  it('converts project hyphens to underscores in env var name', async () => {
     process.env.AI_COMMS_TOKEN_MY_PROJECT = 'dash-token';
     const { projectTokenEnvKey, getEffectiveToken } = await import('../src/secrets.js');
     assert.equal(projectTokenEnvKey('my-project'), 'AI_COMMS_TOKEN_MY_PROJECT');
@@ -257,8 +257,8 @@ describe('precedencia de token', () => {
   });
 });
 
-describe('migración v0', () => {
-  it('mueve estado suelto al proyecto defaultProject', async () => {
+describe('v0 migration', () => {
+  it('moves loose state to defaultProject', async () => {
     await withTempHome(async (home) => {
       const commsDir = path.join(home, '.ai-comms');
       mkdirSync(commsDir, { recursive: true });
@@ -274,7 +274,7 @@ describe('migración v0', () => {
       const { maybeMigrateV0, resetMigrationForTests } = await import('../src/migrate.js');
       resetMigrationForTests();
       const messages = maybeMigrateV0();
-      assert.ok(messages.some((m) => m.includes('Migré estado v0')));
+      assert.ok(messages.some((m) => m.includes('Migrated v0 state')));
 
       const projectLog = path.join(commsDir, 'projects', 'acme', 'log.jsonl');
       assert.ok(existsSync(projectLog));
@@ -283,7 +283,7 @@ describe('migración v0', () => {
     });
   });
 
-  it('migra config v0 a v2 y mueve token a secrets.json', async () => {
+  it('migrates v0 config to v2 and moves token to secrets.json', async () => {
     await withTempHome(async (home) => {
       const commsDir = path.join(home, '.ai-comms');
       mkdirSync(commsDir, { recursive: true });
@@ -312,8 +312,8 @@ describe('migración v0', () => {
   });
 });
 
-describe('permisos de Discord', () => {
-  it('computeEffectivePermissions resuelve overwrites de canal', async () => {
+describe('Discord permissions', () => {
+  it('computeEffectivePermissions resolves channel overwrites', async () => {
     const { computeEffectivePermissions, REQUIRED_PERMISSION_BITS } = await import(
       '../src/discord.js'
     );
@@ -340,8 +340,8 @@ describe('permisos de Discord', () => {
   });
 });
 
-describe('tokens no en archivos versionables', () => {
-  it('rechaza guardar token en config.json', async () => {
+describe('tokens not in versioned files', () => {
+  it('rejects saving token in config.json', async () => {
     await withTempHome(async (home) => {
       const { saveConfig } = await import('../src/config.js');
       const configPath = path.join(home, '.ai-comms', 'config.json');
@@ -363,7 +363,7 @@ describe('tokens no en archivos versionables', () => {
     });
   });
 
-  it('.ai-comms.json no acepta token en el schema', async () => {
+  it('.ai-comms.json schema does not accept token', async () => {
     const { RepoCommsSchema } = await import('../src/context.js');
     const result = RepoCommsSchema.safeParse({
       project: 'acme',

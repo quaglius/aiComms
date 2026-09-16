@@ -170,11 +170,11 @@ export function renderEnvelope(envelope: Envelope): RenderResult {
     return { content: fallback, truncated: true };
   }
 
-  // Ni con body vacío entra: cortar acá produciría un bloque json corrupto en el
-  // canal. Preferimos fallar ruidosamente antes que publicar un sobre ilegible.
+  // Even with an empty body it doesn't fit: cutting here would produce a corrupt
+  // json block in the channel. Fail loudly rather than publish an unreadable envelope.
   throw new EnvelopeTooLargeError(
-    `El sobre no entra en ${DISCORD_CHAR_LIMIT} chars ni con body vacío ` +
-      `(${fallback.length}). Reducí refs.paths o acortá el subject.`,
+    `Envelope does not fit in ${DISCORD_CHAR_LIMIT} chars even with an empty body ` +
+      `(${fallback.length}). Reduce refs.paths or shorten the subject.`,
   );
 }
 
@@ -194,10 +194,10 @@ export function parseEnvelopeFromMessage(content: string): Envelope | null {
 export function validateClaimInput(input: SendInput): string | null {
   if (input.type !== 'claim') return null;
   if (!input.refs?.paths?.length) {
-    return 'claim requiere refs.paths con al menos un glob';
+    return 'claim requires refs.paths with at least one glob';
   }
   if (!input.refs.until) {
-    return 'claim requiere refs.until';
+    return 'claim requires refs.until';
   }
   return null;
 }

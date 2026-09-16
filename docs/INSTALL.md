@@ -1,98 +1,105 @@
-# Instalación del MCP server
+# MCP server installation
 
-ai-comms se instala con `npx` sin publicación en npm:
+ai-comms is published on npm as `@quaglius/ai-comms`:
 
 ```bash
-npx github:quaglius/aiComms <comando>
+npx @quaglius/ai-comms <command>
 ```
 
-Requisitos: Node ≥ 22.
+Or install globally:
 
-Setup completo (Discord, token, repos): [`SETUP-FOR-AGENTS.md`](SETUP-FOR-AGENTS.md).
+```bash
+npm install -g @quaglius/ai-comms
+ai-comms <command>
+```
+
+Requirements: Node ≥ 22.
+
+Full setup (Discord, token, repos): [`SETUP-FOR-AGENTS.md`](SETUP-FOR-AGENTS.md).
 
 ---
 
 ## Claude Code
 
-Agregá al archivo de configuración MCP del proyecto o global:
+Add to the project or global MCP config file:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   }
 }
 ```
 
-O instalá el plugin desde este repo (`.claude-plugin/plugin.json`), que registra
-el MCP, la skill y los comandos `/bus:claim`, `/bus:inbox`, `/bus:claims`.
+Or install the plugin from this repo (`.claude-plugin/plugin.json`), which registers
+the MCP, the skill, and the `/bus:claim`, `/bus:inbox`, `/bus:claims` commands.
 
 ---
 
 ## Cursor
 
-En **Cursor Settings → MCP**, agregá un servidor:
+In **Cursor Settings → MCP**, add a server:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   }
 }
 ```
 
-O en `.cursor/mcp.json` del proyecto:
+Or in the project's `.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   }
 }
 ```
 
-Cursor también lee [`AGENTS.md`](../AGENTS.md) en la raíz del repo.
+Cursor also reads [`AGENTS.md`](../AGENTS.md) at the repo root.
 
 ---
 
 ## Codex (OpenAI)
 
-En la configuración MCP de Codex:
+In Codex MCP configuration:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   }
 }
 ```
 
-Codex lee [`AGENTS.md`](../AGENTS.md) en la raíz del repo.
+Codex reads [`AGENTS.md`](../AGENTS.md) at the repo root.
 
 ---
 
 ## Gemini CLI
 
-En `~/.gemini/settings.json` o la config MCP del proyecto:
+In `~/.gemini/settings.json` or the project MCP config:
 
 ```json
 {
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   }
 }
@@ -100,22 +107,22 @@ En `~/.gemini/settings.json` o la config MCP del proyecto:
 
 ---
 
-## Verificar que funciona
+## Verify it works
 
-1. Abrí el proyecto desde un repo con `.ai-comms.json`.
-2. Ejecutá la tool `bus_whoami`.
-3. Debe devolver `dev`, `project`, `repo`, `channelId` y `repoCommsPath` sin token.
+1. Open the project from a repo with `.ai-comms.json`.
+2. Run the `bus_whoami` tool.
+3. It should return `dev`, `project`, `repo`, `channelId`, and `repoCommsPath` without a token.
 
-Si falla, corré `npx github:quaglius/aiComms doctor` en la terminal.
+If it fails, run `npx @quaglius/ai-comms doctor` in the terminal.
 
 ---
 
-## Tools disponibles
+## Available tools
 
-| Tool | Descripción |
+| Tool | Description |
 |---|---|
-| `bus_send` | Publica un sobre (`project` opcional para cruzar proyectos) |
-| `bus_inbox` | Sobres vigentes dirigidos a vos |
-| `bus_claims` | Claims activos del equipo |
-| `bus_release` | Libera un claim |
-| `bus_whoami` | Identidad y contexto resuelto |
+| `bus_send` | Publish an envelope (`project` optional for cross-project) |
+| `bus_inbox` | Active envelopes addressed to you |
+| `bus_claims` | Active team claims |
+| `bus_release` | Release a claim |
+| `bus_whoami` | Identity and resolved context |

@@ -76,7 +76,7 @@ export function loadLog(project: string): Envelope[] {
       const parsed = EnvelopeSchema.parse(JSON.parse(line));
       envelopes.push(parsed);
     } catch {
-      // línea corrupta: ignorar
+      // corrupt line: skip
     }
   }
   return envelopes;

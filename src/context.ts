@@ -53,7 +53,7 @@ export function loadRepoComms(filePath: string): RepoComms {
     raw = JSON.parse(readFileSync(filePath, 'utf8'));
   } catch {
     throw new ContextError(
-      `${filePath} no es JSON válido. Corregí el archivo o ejecutá "ai-comms link" de nuevo.`,
+      `${filePath} is not valid JSON. Fix the file or run "ai-comms link" again.`,
     );
   }
 
@@ -63,7 +63,7 @@ export function loadRepoComms(filePath: string): RepoComms {
       .map((i) => `${i.path.join('.')}: ${i.message}`)
       .join('; ');
     throw new ContextError(
-      `${filePath} inválido: ${issues}. Ejecutá "ai-comms link" para regenerarlo.`,
+      `${filePath} is invalid: ${issues}. Run "ai-comms link" to regenerate it.`,
     );
   }
 
@@ -129,7 +129,7 @@ export function resolveContext(
         return buildUserConfigContext(cfg, project, fromUser.repo, fromUser.channelId, null);
       }
       throw new ContextError(
-        `El proyecto "${options.projectOverride}" no coincide con ${repoCommsPath} ` +
+        `Project "${options.projectOverride}" does not match ${repoCommsPath} ` +
           `(project=${repoComms.project}).`,
       );
     }
@@ -156,9 +156,8 @@ export function resolveContext(
     );
   }
 
-  // Sin .ai-comms.json y sin repo declarado no se inventa el nombre del repo:
-  // un repo mal nombrado rompe el scope de los claims en silencio, que es
-  // justamente la función central de la herramienta.
+  // Without .ai-comms.json and without a declared repo, don't invent the repo name:
+  // a misnamed repo silently breaks claim scoping, which is the tool's core job.
   throw new ContextError(contextResolutionError());
 }
 
@@ -183,9 +182,9 @@ function buildUserConfigContext(
 
 export function contextResolutionError(): string {
   return (
-    'No se pudo resolver el contexto del proyecto/repo.\n' +
-    '  · Ejecutá "ai-comms link" dentro del repo para crear .ai-comms.json, o\n' +
-    '  · Pasá --project <nombre> si ya está configurado en ~/.ai-comms/config.json.'
+    'Could not resolve project/repo context.\n' +
+    '  · Run "ai-comms link" inside the repo to create .ai-comms.json, or\n' +
+    '  · Pass --project <name> if it is already configured in ~/.ai-comms/config.json.'
   );
 }
 
@@ -197,7 +196,7 @@ export function validateRecipient(
   for (const recipient of to) {
     if (recipient === '*' || recipient === dev) continue;
     if (team.length > 0 && !team.includes(recipient)) {
-      return `destinatario "${recipient}" no está en team: ${team.join(', ')}`;
+      return `recipient "${recipient}" is not in team: ${team.join(', ')}`;
     }
   }
   return null;

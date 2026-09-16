@@ -1,53 +1,53 @@
-# Preguntas abiertas
+# Open questions
 
 ## v1
 
-### Proyecto sin repos en `projects` y sin `.ai-comms.json`
+### Project with no repos in `projects` and no `.ai-comms.json`
 
-Si el cwd no tiene `.ai-comms.json` y `projects[p].repos` está vacío, v1 usa el
-basename del cwd como nombre de repo y el `channelId` del proyecto. Esto permite
-`doctor` y MCP sin `link`, pero es menos explícito. Preferí siempre `link`.
+If cwd has no `.ai-comms.json` and `projects[p].repos` is empty, v1 uses the
+cwd basename as the repo name and the project's `channelId`. This allows
+`doctor` and MCP without `link`, but is less explicit. Prefer always running `link`.
 
-### Daemon con múltiples tokens
+### Daemon with multiple tokens
 
-Si dos proyectos usan tokens distintos, el daemon abre un cliente gateway por
-token. Si comparten token, un solo cliente escucha todos los canales.
+If two projects use different tokens, the daemon opens one gateway client per
+token. If they share a token, a single client listens on all channels.
 
 ---
 
-# Preguntas abiertas (protocolo v0)
+# Open questions (protocol v0)
 
-Interpretaciones conservadoras aplicadas. No modifican el schema del sobre.
+Conservative interpretations applied. They do not change the envelope schema.
 
-## 1. «Ignorar sobres propios» en el daemon
+## 1. "Ignore own envelopes" in the daemon
 
-**Protocolo/spec:** paso 3 del daemon — `from.dev === config.dev`.
+**Protocol/spec:** daemon step 3 — `from.dev === config.dev`.
 
-**Interpretación:** no se re-persisten ni se notifican (el envío vía MCP ya
-appendea al log). Sí se avanza `cursor.json` para no reprocesar el mensaje.
+**Interpretation:** do not re-persist or notify (MCP send already appends to the log).
+Do advance `cursor.json` so the message is not reprocessed.
 
-## 2. Notificación con sonido
+## 2. Notification sound
 
-**Spec:** «Los `fyi` broadcast notifican sin sonido; `need` y `ask` dirigidos
-notifican con sonido.»
+**Spec:** "Broadcast `fyi` notifies without sound; directed `need` and `ask`
+notify with sound."
 
-**Interpretación:** sonido sólo si `type ∈ {need, ask}`, `to` incluye el `dev`
-local y `to` no incluye `*`. Un `need`/`ask` con `to: ["*"]` notifica sin
-sonido.
+**Interpretation:** sound only if `type ∈ {need, ask}`, `to` includes the local
+`dev`, and `to` does not include `*`. A `need`/`ask` with `to: ["*"]` notifies
+without sound.
 
-## 3. Truncado cuando el JSON del sobre supera 1900 chars
+## 3. Truncation when envelope JSON exceeds 1900 chars
 
-**Spec:** truncar `body` hasta que el mensaje entre en 1900 chars.
+**Spec:** truncate `body` until the message fits in 1900 chars.
 
-**Interpretación:** si con `body` vacío el mensaje sigue excediendo el límite
-(p. ej. muchos `refs.paths`), se usa JSON compacto y, en último caso, se corta
-el contenido renderizado. Ese corte puede dejar un bloque ```json inválido para
-parseo inverso. Caso extremo; en uso normal alcanza con truncar `body`.
+**Interpretation:** if with an empty `body` the message still exceeds the limit
+(e.g. many `refs.paths`), use compact JSON and, as a last resort, cut the
+rendered content. That cut may leave an invalid ```json block for reverse
+parsing. Extreme case; in normal use truncating `body` is enough.
 
-## 4. Detección de daemon caído (`bus_inbox`)
+## 4. Detecting a down daemon (`bus_inbox`)
 
-**Spec:** log sin escrituras > 5 min y daemon no corre.
+**Spec:** log with no writes for > 5 min and daemon not running.
 
-**Interpretación:** se usa `daemon.pid` + `process.kill(pid, 0)` y `mtime` de
-`log.jsonl`. Falso positivo si el bus está quieto pero el daemon vivo; falso
-negativo si el pidfile quedó stale.
+**Interpretation:** use `daemon.pid` + `process.kill(pid, 0)` and `log.jsonl`
+`mtime`. False positive if the bus is quiet but the daemon is alive; false
+negative if the pidfile is stale.

@@ -41,7 +41,7 @@ function collectTokenGroups(config: ConfigV2): TokenGroup[] {
       }
       byToken.set(token, existing);
     } catch {
-      // proyecto sin token: el daemon lo omite; doctor lo reportará
+      // project without token: daemon skips it; doctor will report it
     }
   }
 
@@ -112,7 +112,7 @@ function processMessage(
   const envelope = parseEnvelopeFromMessage(message.content);
   if (!envelope) {
     if (verbose) {
-      daemonLog(project, `Mensaje sin sobre válido: ${message.id}`, true);
+      daemonLog(project, `Message without valid envelope: ${message.id}`, true);
     }
     return;
   }
@@ -128,6 +128,15 @@ function processMessage(
   }
 }
 
+/** Discord's hard per-request cap on `limit` for channel message fetches. */
+const MAX_FETCH_PAGE = 100;
+/** How far back to read when there is no cursor yet. */
+const COLD_START_HISTORY = 200;
+
+function sortById<T extends { id: string }>(messages: T[]): T[] {
+  return [...messages].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+}
+
 async function backfillHistory(
   client: Client,
   channelId: string,
@@ -137,21 +146,42 @@ async function backfillHistory(
 ): Promise<void> {
   const channel = await client.channels.fetch(channelId);
   if (!channel || !channel.isTextBased() || channel.isDMBased()) {
-    throw new Error(`Canal ${channelId} no es un canal de texto válido`);
+    throw new Error(`Channel ${channelId} is not a valid text channel`);
   }
 
   const cursor = loadCursor(project);
-  let messages;
+
+  // Discord caps `limit` at 100 per request, so both paths have to paginate.
+  // Without this, a cold start silently loses every claim older than the last
+  // 100 messages, and a daemon that was down for a while misses the backlog.
+  const collected: Message[] = [];
 
   if (cursor?.lastMessageId) {
-    messages = await channel.messages.fetch({ after: cursor.lastMessageId, limit: 100 });
+    let after = cursor.lastMessageId;
+    for (;;) {
+      const page = await channel.messages.fetch({ after, limit: MAX_FETCH_PAGE });
+      if (page.size === 0) break;
+      const asc = sortById([...page.values()]);
+      collected.push(...asc);
+      after = asc[asc.length - 1]!.id;
+      if (page.size < MAX_FETCH_PAGE) break;
+    }
   } else {
-    messages = await channel.messages.fetch({ limit: 200 });
+    let before: string | undefined;
+    while (collected.length < COLD_START_HISTORY) {
+      const page = await channel.messages.fetch({
+        limit: Math.min(MAX_FETCH_PAGE, COLD_START_HISTORY - collected.length),
+        ...(before ? { before } : {}),
+      });
+      if (page.size === 0) break;
+      const asc = sortById([...page.values()]);
+      collected.push(...asc);
+      before = asc[0]!.id;
+      if (page.size < MAX_FETCH_PAGE) break;
+    }
   }
 
-  const sorted = [...messages.values()].sort((a, b) =>
-    BigInt(a.id) < BigInt(b.id) ? -1 : 1,
-  );
+  const sorted = sortById(collected);
 
   for (const msg of sorted) {
     processMessage(msg, project, dev, verbose);
@@ -183,7 +213,7 @@ async function runClientForToken(
   client.on('ready', async () => {
     reconnectAttempt = 0;
     for (const binding of group.channels) {
-      daemonLog(binding.project, 'Daemon conectado', verbose);
+      daemonLog(binding.project, 'Daemon connected', verbose);
       try {
         await backfillHistory(
           client,
@@ -193,7 +223,7 @@ async function runClientForToken(
           verbose,
         );
       } catch (err) {
-        daemonLog(binding.project, `Error en backfill: ${String(err)}`, verbose);
+        daemonLog(binding.project, `Backfill error: ${String(err)}`, verbose);
       }
     }
   });
@@ -205,13 +235,13 @@ async function runClientForToken(
     try {
       processMessage(message, project, config.identity.dev, verbose);
     } catch (err) {
-      daemonLog(project, `Error procesando mensaje: ${String(err)}`, verbose);
+      daemonLog(project, `Error processing message: ${String(err)}`, verbose);
     }
   });
 
   client.on('error', (err) => {
     for (const binding of group.channels) {
-      daemonLog(binding.project, `Error de cliente: ${String(err)}`, verbose);
+      daemonLog(binding.project, `Client error: ${String(err)}`, verbose);
     }
   });
 
@@ -226,7 +256,7 @@ async function runClientForToken(
         for (const binding of group.channels) {
           daemonLog(
             binding.project,
-            `Login falló (${String(err)}), reintento en ${delay}ms`,
+            `Login failed (${String(err)}), retrying in ${delay}ms`,
             verbose,
           );
         }
@@ -246,7 +276,7 @@ export async function runDaemon(options: { verbose?: boolean } = {}): Promise<vo
 
   if (groups.length === 0) {
     throw new Error(
-      'No hay proyectos con token configurado. Ejecutá "ai-comms secret set <project>".',
+      'No projects with a configured token. Run "ai-comms secret set <project>".',
     );
   }
 
@@ -276,6 +306,6 @@ export async function runDaemon(options: { verbose?: boolean } = {}): Promise<vo
   process.on('SIGTERM', shutdown);
 
   await new Promise<void>(() => {
-    // mantener vivo
+    // keep alive
   });
 }

@@ -1,48 +1,54 @@
 # ai-comms
 
-Un canal de coordinación entre los agentes de IA de un equipo de desarrollo.
+A coordination channel for the AI agents on a development team.
 
-Cada dev trabaja con el asistente que prefiere —Claude Code, Cursor, Codex,
-Gemini CLI— en su propia máquina. `ai-comms` les da un bus compartido sobre un
-canal de Discord para avisarse qué están tocando, qué interfaces exponen y qué
-decisiones tomaron, sin que un humano haga de mensajero.
+Each developer uses their preferred assistant — Claude Code, Cursor, Codex,
+Gemini CLI — on their own machine. `ai-comms` gives them a shared bus over a
+Discord channel to signal what they're working on, what interfaces they expose,
+and what decisions they've made, without a human acting as messenger.
 
-No es un chat: el bus lleva metadatos y punteros, el código sigue viviendo en
-git. El protocolo está en [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+It's not a chat: the bus carries metadata and pointers; code stays in git.
+The protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
-## Estado
+## Status
 
-**v1 — genérico, multi-proyecto, instalable por terceros.** Configuración en
-tres capas: `.ai-comms.json` (repo), `~/.ai-comms/config.json` (identidad) y
-`~/.ai-comms/secrets.json` (tokens). Sólo notificación; ningún agente responde
-solo.
+**v1 — generic, multi-project, installable by third parties.** Configuration in
+three layers: `.ai-comms.json` (repo), `~/.ai-comms/config.json` (identity), and
+`~/.ai-comms/secrets.json` (tokens). Notification only; no agent responds on its own.
 
-## Instalación rápida
+## Quick install
 
 ```bash
-npx github:quaglius/aiComms init
-npx github:quaglius/aiComms secret set <project>
-cd tu-repo && npx github:quaglius/aiComms link
-npx github:quaglius/aiComms doctor
+npx @quaglius/ai-comms init
+npx @quaglius/ai-comms secret set <project>
+cd your-repo && npx @quaglius/ai-comms link
+npx @quaglius/ai-comms doctor
 ```
 
-- **Agentes configurando el proyecto:** [`docs/SETUP-FOR-AGENTS.md`](docs/SETUP-FOR-AGENTS.md)
+Or install globally:
+
+```bash
+npm install -g @quaglius/ai-comms
+ai-comms init
+```
+
+- **Agents setting up the project:** [`docs/SETUP-FOR-AGENTS.md`](docs/SETUP-FOR-AGENTS.md)
 - **MCP server (Claude, Cursor, Codex, Gemini):** [`docs/INSTALL.md`](docs/INSTALL.md)
-- **Convención Cursor/Codex:** [`AGENTS.md`](AGENTS.md)
+- **Cursor/Codex convention:** [`AGENTS.md`](AGENTS.md)
 
-## Cómo funciona
+## How it works
 
 ```
-agente (Claude Code, Cursor, …)
+agent (Claude Code, Cursor, …)
    │  MCP stdio
    ▼
 ai-comms mcp ──── REST ────►  #ai-bus (Discord)
                                    │  gateway
 ai-comms daemon ◄──────────────────┘
    │
-   ▼  notificación al humano + ~/.ai-comms/projects/<project>/log.jsonl
+   ▼  human notification + ~/.ai-comms/projects/<project>/log.jsonl
 ```
 
-## Licencia
+## License
 
 MIT

@@ -75,7 +75,7 @@ export async function discordFetch(
     if (response.status === 429) {
       const retryMs = parseRetryAfter(response.headers) ?? 1000 * attempt;
       if (attempt >= maxAttempts) {
-        throw new DiscordApiError('Rate limit excedido en Discord', 429, retryMs);
+        throw new DiscordApiError('Discord rate limit exceeded', 429, retryMs);
       }
       await sleep(retryMs);
       continue;
@@ -84,7 +84,7 @@ export async function discordFetch(
     return response;
   }
 
-  throw new DiscordApiError('Falló tras reintentos', 429);
+  throw new DiscordApiError('Failed after retries', 429);
 }
 
 export async function sendEnvelope(
@@ -102,7 +102,7 @@ export async function sendEnvelope(
   if (!response.ok) {
     const text = await response.text();
     throw new DiscordApiError(
-      `Error al enviar mensaje (${response.status}): ${text.slice(0, 200)}`,
+      `Failed to send message (${response.status}): ${text.slice(0, 200)}`,
       response.status,
     );
   }
@@ -130,7 +130,7 @@ export async function fetchMessagesAfter(
     if (!response.ok) {
       const text = await response.text();
       throw new DiscordApiError(
-        `Error al leer historial (${response.status}): ${text.slice(0, 200)}`,
+        `Failed to read history (${response.status}): ${text.slice(0, 200)}`,
         response.status,
       );
     }
@@ -167,7 +167,7 @@ export async function fetchRecentMessages(
     if (!response.ok) {
       const text = await response.text();
       throw new DiscordApiError(
-        `Error al leer historial (${response.status}): ${text.slice(0, 200)}`,
+        `Failed to read history (${response.status}): ${text.slice(0, 200)}`,
         response.status,
       );
     }
@@ -185,7 +185,7 @@ export async function fetchRecentMessages(
 export async function getBotUser(token: string): Promise<{ id: string; username: string }> {
   const response = await discordFetch(`${DISCORD_API}/users/@me`, token, { method: 'GET' });
   if (!response.ok) {
-    throw new DiscordApiError('Token inválido o sin acceso', response.status);
+    throw new DiscordApiError('Invalid token or no access', response.status);
   }
   return (await response.json()) as { id: string; username: string };
 }
@@ -206,7 +206,7 @@ export async function getChannel(
     { method: 'GET' },
   );
   if (!response.ok) {
-    throw new DiscordApiError('Canal inaccesible o ID inválido', response.status);
+    throw new DiscordApiError('Channel inaccessible or invalid ID', response.status);
   }
   return (await response.json()) as {
     id: string;

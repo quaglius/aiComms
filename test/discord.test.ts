@@ -4,7 +4,7 @@ import type { Envelope } from '../src/envelope.js';
 import { createEnvelope } from '../src/envelope.js';
 
 describe('discord REST send', () => {
-  it('envía con Authorization Bot y respeta truncado', async () => {
+  it('sends with Authorization Bot and respects truncation', async () => {
     const calls: { url: string; init: RequestInit }[] = [];
     const originalFetch = globalThis.fetch;
 
@@ -16,7 +16,7 @@ describe('discord REST send', () => {
     try {
       const { sendEnvelope } = await import('../src/discord.js');
       const envelope = createEnvelope(
-        { type: 'fyi', subject: 'test rest', body: 'hola' },
+        { type: 'fyi', subject: 'test rest', body: 'hello' },
         { dev: 'dani', agent: 'cursor', repo: 'ai-comms' },
       );
 
@@ -35,7 +35,7 @@ describe('discord REST send', () => {
     }
   });
 
-  it('reintenta ante 429 hasta 3 veces', async () => {
+  it('retries on 429 up to 3 times', async () => {
     let attempts = 0;
     const originalFetch = globalThis.fetch;
 
@@ -64,8 +64,8 @@ describe('discord REST send', () => {
   });
 });
 
-describe('doctor sin config', () => {
-  it('devuelve error claro sin stacktrace', async () => {
+describe('doctor without config', () => {
+  it('returns a clear error without stack trace', async () => {
     const originalExit = process.exitCode;
     const stderr: string[] = [];
     const originalWrite = process.stderr.write.bind(process.stderr);
@@ -79,7 +79,7 @@ describe('doctor sin config', () => {
     try {
       assert.throws(() => {
         throw new ConfigError(
-          `No se encontró config en ${getConfigPath()}. Ejecutá "ai-comms init" para crearla.`,
+          `No config found at ${getConfigPath()}. Run "ai-comms init" to create one.`,
         );
       });
 
@@ -92,10 +92,10 @@ describe('doctor sin config', () => {
   });
 });
 
-describe('parseEnvelopeFromMessage tolerancia', () => {
-  it('retorna null para mensajes humanos sin json', async () => {
+describe('parseEnvelopeFromMessage tolerance', () => {
+  it('returns null for human messages without json', async () => {
     const { parseEnvelopeFromMessage } = await import('../src/envelope.js');
-    assert.equal(parseEnvelopeFromMessage('hola equipo, revisen el PR cuando puedan'), null);
+    assert.equal(parseEnvelopeFromMessage('hey team, check the PR when you can'), null);
     assert.equal(parseEnvelopeFromMessage('```json\n{not json}\n```'), null);
   });
 });

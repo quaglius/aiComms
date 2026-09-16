@@ -39,7 +39,7 @@ export function getProjectDaemonPidPath(project: string): string {
   return path.join(getProjectDir(project), 'daemon.pid');
 }
 
-/** @deprecated v0 layout — usado sólo para migración */
+/** @deprecated v0 layout — migration only */
 export function getV0LogPath(): string {
   return path.join(getConfigDir(), 'log.jsonl');
 }

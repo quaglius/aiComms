@@ -23,13 +23,13 @@ export function saveSecrets(secrets: SecretsFile, secretsPath = getSecretsPath()
     encoding: 'utf8',
     mode: 0o600,
   });
-  // mode sólo aplica al crear: forzarlo también sobre un archivo preexistente.
-  // En Windows es prácticamente un no-op; en macOS/Linux evita que el token
-  // quede legible por otros usuarios de la máquina.
+  // mode only applies on create: force it on pre-existing files too.
+  // On Windows this is effectively a no-op; on macOS/Linux it keeps the token
+  // from being readable by other users on the machine.
   try {
     chmodSync(secretsPath, 0o600);
   } catch {
-    // sistemas sin permisos POSIX
+    // systems without POSIX permissions
   }
 }
 
@@ -65,8 +65,8 @@ export function getEffectiveToken(
   }
 
   throw new SecretsError(
-    `No hay token para el proyecto "${project}". Ejecutá "ai-comms secret set ${project}" ` +
-      `o definí ${projectKey} / AI_COMMS_TOKEN.`,
+    `No token for project "${project}". Run "ai-comms secret set ${project}" ` +
+      `or set ${projectKey} / AI_COMMS_TOKEN.`,
   );
 }
 

@@ -32,7 +32,7 @@ export const ConfigV2Schema = z.object({
 export type ConfigV2 = z.infer<typeof ConfigV2Schema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 
-/** @deprecated alias de compatibilidad interna */
+/** @deprecated internal compatibility alias */
 export type Config = ConfigV2;
 
 export class ConfigError extends Error {
@@ -50,7 +50,7 @@ export function loadConfig(configPath = getConfigPath()): ConfigV2 {
 
   if (!existsSync(configPath)) {
     throw new ConfigError(
-      `No se encontró config en ${configPath}. Ejecutá "ai-comms init" para crearla.`,
+      `No config found at ${configPath}. Run "ai-comms init" to create one.`,
     );
   }
 
@@ -58,7 +58,7 @@ export function loadConfig(configPath = getConfigPath()): ConfigV2 {
   try {
     raw = JSON.parse(readFileSync(configPath, 'utf8'));
   } catch {
-    throw new ConfigError(`Config inválida en ${configPath}: JSON mal formado.`);
+    throw new ConfigError(`Invalid config at ${configPath}: malformed JSON.`);
   }
 
   const parsed = ConfigV2Schema.safeParse(raw);
@@ -66,7 +66,7 @@ export function loadConfig(configPath = getConfigPath()): ConfigV2 {
     const issues = parsed.error.issues
       .map((i) => `${i.path.join('.')}: ${i.message}`)
       .join('; ');
-    throw new ConfigError(`Config inválida en ${configPath}: ${issues}`);
+    throw new ConfigError(`Invalid config at ${configPath}: ${issues}`);
   }
 
   assertNoTokenInConfig(parsed.data, configPath);
@@ -77,8 +77,8 @@ function assertNoTokenInConfig(config: ConfigV2, configPath: string): void {
   const serialized = JSON.stringify(config);
   if (serialized.includes('"token"')) {
     throw new ConfigError(
-      `Config en ${configPath} contiene un token. Mové el token a ~/.ai-comms/secrets.json ` +
-        `con "ai-comms secret set <project>".`,
+      `Config at ${configPath} contains a token. Move the token to ~/.ai-comms/secrets.json ` +
+        `with "ai-comms secret set <project>".`,
     );
   }
 }

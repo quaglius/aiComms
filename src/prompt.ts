@@ -51,7 +51,7 @@ export async function promptSecret(question: string): Promise<string> {
           input.setRawMode(false);
           input.pause();
           input.removeListener('data', onData);
-          reject(new Error('Cancelado'));
+          reject(new Error('Cancelled'));
           break;
         case '\u007f':
         case '\b':

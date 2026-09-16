@@ -40,12 +40,12 @@ import {
 } from './store.js';
 
 async function runInit(): Promise<void> {
-  console.log('Configuración inicial de ai-comms\n');
+  console.log('ai-comms initial setup\n');
 
-  const dev = await prompt('dev (slug estable, ej. ana)');
-  const agent = await prompt('agent (ej. claude-code, cursor)');
-  const project = await prompt('project (nombre del equipo/proyecto, ej. acme)');
-  const channelId = await prompt('Discord channel ID del proyecto');
+  const dev = await prompt('dev (stable slug, e.g. ana)');
+  const agent = await prompt('agent (e.g. claude-code, cursor)');
+  const project = await prompt('project (team/project name, e.g. acme)');
+  const channelId = await prompt('Discord channel ID for the project');
 
   const config = ConfigV2Schema.parse({
     version: 2,
@@ -60,9 +60,9 @@ async function runInit(): Promise<void> {
   });
 
   saveConfig(config);
-  console.log(`\nConfig guardada en ~/.ai-comms/config.json`);
-  console.log(`Ejecutá "ai-comms secret set ${project}" para cargar el token del bot.`);
-  console.log('Luego "ai-comms link" en cada repo y "ai-comms doctor" para verificar.');
+  console.log(`\nConfig saved to ~/.ai-comms/config.json`);
+  console.log(`Run "ai-comms secret set ${project}" to store the bot token.`);
+  console.log('Then run "ai-comms link" in each repo and "ai-comms doctor" to verify.');
 }
 
 async function runLink(): Promise<void> {
@@ -71,7 +71,7 @@ async function runLink(): Promise<void> {
   const target = path.join(cwd, REPO_COMMS_FILENAME);
 
   if (existsSync(target)) {
-    console.error(`${target} ya existe. Editá el archivo manualmente si necesitás cambiarlo.`);
+    console.error(`${target} already exists. Edit the file manually if you need to change it.`);
     process.exit(1);
   }
 
@@ -83,7 +83,7 @@ async function runLink(): Promise<void> {
   const projectConfig = config.projects[project];
   if (!projectConfig) {
     console.error(
-      `El proyecto "${project}" no está en config. Ejecutá "ai-comms init" o agregalo manualmente.`,
+      `Project "${project}" is not in config. Run "ai-comms init" or add it manually.`,
     );
     process.exit(1);
   }
@@ -96,8 +96,8 @@ async function runLink(): Promise<void> {
   });
 
   writeFileSync(target, JSON.stringify(repoComms, null, 2) + '\n', 'utf8');
-  console.log(`Creado ${target}`);
-  console.log('Commiteá este archivo para que tu equipo lo use con "ai-comms join".');
+  console.log(`Created ${target}`);
+  console.log('Commit this file so your team can use it with "ai-comms join".');
 }
 
 async function runJoin(repoPath: string): Promise<void> {
@@ -105,7 +105,7 @@ async function runJoin(repoPath: string): Promise<void> {
   const repoCommsFile = path.join(absPath, REPO_COMMS_FILENAME);
 
   if (!existsSync(repoCommsFile)) {
-    console.error(`No se encontró ${repoCommsFile}. ¿Clonaste el repo correcto?`);
+    console.error(`Could not find ${repoCommsFile}. Did you clone the correct repo?`);
     process.exit(1);
   }
 
@@ -117,7 +117,7 @@ async function runJoin(repoPath: string): Promise<void> {
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(
-        `${err.message}\nEjecutá "ai-comms init" primero para configurar tu identidad.`,
+        `${err.message}\nRun "ai-comms init" first to configure your identity.`,
       );
       process.exit(1);
     }
@@ -138,24 +138,24 @@ async function runJoin(repoPath: string): Promise<void> {
   }
 
   saveConfig(config);
-  console.log(`Proyecto "${project}" registrado (repo: ${repoComms.repo}).`);
-  console.log(`Ejecutá "ai-comms secret set ${project}" y luego "ai-comms doctor".`);
+  console.log(`Project "${project}" registered (repo: ${repoComms.repo}).`);
+  console.log(`Run "ai-comms secret set ${project}" then "ai-comms doctor".`);
 }
 
 async function runSecretSet(project: string): Promise<void> {
   if (!project) {
-    console.error('Uso: ai-comms secret set <project>');
+    console.error('Usage: ai-comms secret set <project>');
     process.exit(1);
   }
 
   const token = await promptSecret('Discord bot token');
   if (!token) {
-    console.error('Token vacío, cancelado.');
+    console.error('Empty token, cancelled.');
     process.exit(1);
   }
 
   setProjectToken(project, token);
-  console.log(`Token guardado para "${project}" en ~/.ai-comms/secrets.json`);
+  console.log(`Token saved for "${project}" in ~/.ai-comms/secrets.json`);
 }
 
 async function runDoctor(projectOverride?: string): Promise<number> {
@@ -180,7 +180,7 @@ async function runDoctor(projectOverride?: string): Promise<number> {
     }
 
     console.log('ai-comms doctor\n');
-    console.log('Identidad:');
+    console.log('Identity:');
     console.log(`  dev:     ${ctx.dev}`);
     console.log(`  agent:   ${ctx.agent}`);
     console.log(`  project: ${ctx.project}`);
@@ -207,33 +207,33 @@ async function runDoctor(projectOverride?: string): Promise<number> {
       const bot = await getBotUser(tokenInfo.token);
       console.log(`Bot: ${bot.username} (${bot.id}) ✓`);
     } catch {
-      console.error('Bot: no se pudo autenticar. Verificá el token.');
+      console.error('Bot: could not authenticate. Check the token.');
       return 1;
     }
 
     try {
       const channel = await getChannel(ctx.channelId, tokenInfo.token);
       const name = channel.name ?? channel.id;
-      console.log(`Canal: #${name} ✓`);
+      console.log(`Channel: #${name} ✓`);
     } catch {
-      console.error('Canal: inaccesible. Verificá channelId y permisos del bot.');
+      console.error('Channel: inaccessible. Check channelId and bot permissions.');
       return 1;
     }
 
     const perms = await checkBotPermissions(ctx.channelId, tokenInfo.token);
     if (!perms.ok) {
-      console.error(`Permisos faltantes: ${perms.missing.join(', ')}`);
+      console.error(`Missing permissions: ${perms.missing.join(', ')}`);
       console.error(
-        `El bot necesita VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY (${REQUIRED_PERMISSION_BITS}).`,
+        `The bot needs VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY (${REQUIRED_PERMISSION_BITS}).`,
       );
       console.error(
-        'Reinvitá el bot con permissions=68608 o ajustá los overwrites del canal.',
+        'Re-invite the bot with permissions=68608 or adjust channel overwrites.',
       );
       return 1;
     }
-    console.log('Permisos: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
+    console.log('Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
 
-    console.log('\nDiagnóstico OK.');
+    console.log('\nDiagnostics OK.');
     console.log(JSON.stringify(redactedContext(ctx), null, 2));
     return 0;
   } catch (err) {
@@ -241,7 +241,7 @@ async function runDoctor(projectOverride?: string): Promise<number> {
       console.error(err.message);
       return 1;
     }
-    console.error(`Error inesperado: ${String(err)}`);
+    console.error(`Unexpected error: ${String(err)}`);
     return 1;
   }
 }
@@ -257,7 +257,7 @@ async function runInbox(all: boolean, projectOverride?: string): Promise<void> {
   });
 
   if (inbox.length === 0) {
-    console.log('Inbox vacío.');
+    console.log('Inbox empty.');
     return;
   }
 
@@ -268,7 +268,7 @@ async function runInbox(all: boolean, projectOverride?: string): Promise<void> {
   }
 
   markRead(ctx.project, inbox.map((e) => e.id));
-  console.log(`\n${inbox.length} mensaje(s) marcado(s) como leído.`);
+  console.log(`\n${inbox.length} message(s) marked as read.`);
 }
 
 async function runClaims(projectOverride?: string): Promise<void> {
@@ -278,7 +278,7 @@ async function runClaims(projectOverride?: string): Promise<void> {
   const claims = materializeActiveClaims(log);
 
   if (claims.length === 0) {
-    console.log('(sin claims activos)');
+    console.log('(no active claims)');
     return;
   }
 
@@ -293,40 +293,40 @@ const program = new Command();
 
 program
   .name('ai-comms')
-  .description('Canal de coordinación entre agentes de IA')
+  .description('Coordination channel for AI agents')
   .version('1.0.0');
 
-program.command('init').description('Crea identidad y primer proyecto').action(async () => {
+program.command('init').description('Create identity and first project').action(async () => {
   await runInit();
 });
 
 program
   .command('link')
-  .description('Crea .ai-comms.json en el repo actual')
+  .description('Create .ai-comms.json in the current repo')
   .action(async () => {
     await runLink();
   });
 
 program
   .command('join')
-  .description('Registra un repo con .ai-comms.json existente')
-  .argument('<ruta>', 'ruta al repo')
+  .description('Register a repo with an existing .ai-comms.json')
+  .argument('<path>', 'path to repo')
   .action(async (repoPath: string) => {
     await runJoin(repoPath);
   });
 
-const secretCmd = program.command('secret').description('Gestión de secretos');
+const secretCmd = program.command('secret').description('Secret management');
 secretCmd
   .command('set <project>')
-  .description('Guarda el token del bot (prompt oculto)')
+  .description('Save the bot token (hidden prompt)')
   .action(async (project: string) => {
     await runSecretSet(project);
   });
 
 program
   .command('doctor')
-  .description('Diagnóstico de config y conectividad')
-  .option('--project <p>', 'proyecto a diagnosticar')
+  .description('Config and connectivity diagnostics')
+  .option('--project <p>', 'project to diagnose')
   .action(async (opts: { project?: string }) => {
     const code = await runDoctor(opts.project);
     process.exitCode = code;
@@ -334,8 +334,8 @@ program
 
 program
   .command('daemon')
-  .description('Escucha canales de Discord de todos los proyectos')
-  .option('--verbose', 'Log detallado a stderr')
+  .description('Listen on Discord channels for all projects')
+  .option('--verbose', 'Verbose log to stderr')
   .action(async (opts: { verbose?: boolean }) => {
     try {
       await runDaemon({ verbose: opts.verbose });
@@ -348,23 +348,23 @@ program
     }
   });
 
-program.command('mcp').description('Servidor MCP stdio').action(async () => {
+program.command('mcp').description('MCP stdio server').action(async () => {
   await runMcpServer();
 });
 
 program
   .command('inbox')
-  .description('Imprime el inbox y lo marca leído')
-  .option('--all', 'Incluir mensajes ya leídos')
-  .option('--project <p>', 'proyecto')
+  .description('Print the inbox and mark it read')
+  .option('--all', 'Include already-read messages')
+  .option('--project <p>', 'project')
   .action(async (opts: { all?: boolean; project?: string }) => {
     await runInbox(opts.all ?? false, opts.project);
   });
 
 program
   .command('claims')
-  .description('Lista claims activos del equipo')
-  .option('--project <p>', 'proyecto')
+  .description('List active team claims')
+  .option('--project <p>', 'project')
   .action(async (opts: { project?: string }) => {
     await runClaims(opts.project);
   });

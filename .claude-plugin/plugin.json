@@ -1,12 +1,12 @@
 {
   "name": "ai-comms",
   "version": "1.0.0",
-  "description": "Canal de coordinación entre agentes de IA del equipo vía Discord",
+  "description": "Team AI agent coordination channel over Discord",
   "author": "quaglius",
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["github:quaglius/aiComms", "mcp"]
+      "args": ["@quaglius/ai-comms", "mcp"]
     }
   },
   "skills": [
@@ -18,18 +18,18 @@
   "commands": [
     {
       "name": "bus:claim",
-      "description": "Publica un claim en el bus (reserva paths hasta until)",
-      "template": "Usá bus_send con type claim. Primero consultá bus_claims para ver conflictos. Preguntame qué paths reservar y hasta cuándo."
+      "description": "Publish a claim on the bus (reserve paths until until)",
+      "template": "Use bus_send with type claim. First check bus_claims for conflicts. Ask me which paths to reserve and until when."
     },
     {
       "name": "bus:inbox",
-      "description": "Muestra el inbox del bus",
-      "template": "Ejecutá bus_inbox con unread_only true y mostráme los sobres vigentes dirigidos a mí."
+      "description": "Show the bus inbox",
+      "template": "Run bus_inbox with unread_only true and show me active envelopes addressed to me."
     },
     {
       "name": "bus:claims",
-      "description": "Lista claims activos del equipo",
-      "template": "Ejecutá bus_claims y mostráme los claims activos con dueño, repo, paths y vencimiento."
+      "description": "List active team claims",
+      "template": "Run bus_claims and show me active claims with owner, repo, paths, and expiry."
     }
   ]
 }

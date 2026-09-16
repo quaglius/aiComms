@@ -49,7 +49,7 @@ export function maybeMigrateV0(): string[] {
         messages.push(...migrateV0Config(v0.data, configPath));
       }
     } catch {
-      // config inválida: loadConfig lo reportará
+      // invalid config: loadConfig will report it
     }
   }
 
@@ -83,7 +83,7 @@ function migrateV0Config(
   writeFileSync(configPath, JSON.stringify(v2, null, 2) + '\n', 'utf8');
 
   messages.push(
-    `Migré config v0 → v2 (proyecto "${project}"). Token movido a secrets.json.`,
+    `Migrated config v0 → v2 (project "${project}"). Token moved to secrets.json.`,
   );
   return messages;
 }
@@ -122,12 +122,12 @@ function migrateV0StateFiles(configPath: string): string[] {
     const dest = path.join(projectDir, file.name);
     if (existsSync(dest)) continue;
     renameSync(file.from, dest);
-    messages.push(`Moví ${file.from} → ${dest}`);
+    messages.push(`Moved ${file.from} → ${dest}`);
   }
 
   if (messages.length > 0) {
     messages.unshift(
-      `Migré estado v0 al proyecto "${defaultProject}" en ~/.ai-comms/projects/${defaultProject}/`,
+      `Migrated v0 state to project "${defaultProject}" in ~/.ai-comms/projects/${defaultProject}/`,
     );
   }
 
