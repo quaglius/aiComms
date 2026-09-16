@@ -31,6 +31,30 @@ export interface GitHubTransportOptions {
   setEtag?: (etag: string | undefined) => void;
 }
 
+/**
+ * The cursor carries a timestamp and the last comment id, as "<iso>|<id>".
+ *
+ * GitHub's `since` filter is inclusive, so a timestamp alone hands back the
+ * comment sitting exactly on the boundary every single poll: a repeated toast
+ * for every message, and — worse — a second headless answerer launched for a
+ * question the first one has not finished answering yet. Comment ids are
+ * monotonic, so they are what makes the cursor actually exclusive.
+ *
+ * A cursor with no "|" is a pre-0.5.1 timestamp and still works.
+ */
+export function parseCursor(cursor: string | null): { since: string | null; lastId: number } {
+  if (!cursor) return { since: null, lastId: 0 };
+  const idx = cursor.lastIndexOf('|');
+  if (idx === -1) return { since: cursor, lastId: 0 };
+  const id = Number(cursor.slice(idx + 1));
+  return { since: cursor.slice(0, idx), lastId: Number.isFinite(id) ? id : 0 };
+}
+
+export function formatCursor(since: string | null, lastId: number): string | null {
+  if (!since) return null;
+  return lastId > 0 ? `${since}|${lastId}` : since;
+}
+
 export class GitHubTransport implements Transport {
   private readonly owner: string;
   private readonly repoName: string;
@@ -101,9 +125,10 @@ export class GitHubTransport implements Transport {
   }
 
   async fetchSince(cursor: string | null): Promise<TransportFetchResult> {
+    const { since, lastId } = parseCursor(cursor);
     const params = new URLSearchParams({ per_page: '100' });
-    if (cursor) {
-      params.set('since', cursor);
+    if (since) {
+      params.set('since', since);
     }
 
     const path = `/repos/${this.owner}/${this.repoName}/issues/${this.issue}/comments?${params}`;
@@ -125,19 +150,25 @@ export class GitHubTransport implements Transport {
 
     const comments = (await response.json()) as GitHubComment[];
     const envelopes: Envelope[] = [];
-    let latestCursor = cursor;
+    let latestSince = since;
+    let latestId = lastId;
 
     for (const comment of comments) {
-      const parsed = this.readComment(comment);
-      if (!parsed) continue;
+      // `since` is inclusive, so the comment sitting exactly on the cursor comes
+      // back on every poll. Ids are monotonic, so they are what actually makes
+      // the cursor exclusive.
+      if (comment.id <= lastId) continue;
 
-      envelopes.push(parsed);
-      if (!latestCursor || comment.created_at > latestCursor) {
-        latestCursor = comment.created_at;
+      const parsed = this.readComment(comment);
+      if (parsed) envelopes.push(parsed);
+
+      if (!latestSince || comment.created_at > latestSince) {
+        latestSince = comment.created_at;
       }
+      if (comment.id > latestId) latestId = comment.id;
     }
 
-    return { envelopes, cursor: latestCursor };
+    return { envelopes, cursor: formatCursor(latestSince, latestId) };
   }
 
   /**
@@ -172,21 +203,23 @@ export class GitHubTransport implements Transport {
 
   /** Paginate through all comments newer than cursor (for cold start / backlog). */
   async fetchAllSince(cursor: string | null): Promise<TransportFetchResult> {
+    const { since, lastId } = parseCursor(cursor);
     const all: Envelope[] = [];
-    let currentCursor = cursor;
+    let latestSince = since;
+    let latestId = lastId;
     let page = 1;
 
     for (;;) {
       const params = new URLSearchParams({ per_page: '100', page: String(page) });
-      if (cursor) {
-        params.set('since', cursor);
+      if (since) {
+        params.set('since', since);
       }
 
       const path = `/repos/${this.owner}/${this.repoName}/issues/${this.issue}/comments?${params}`;
       const response = await githubFetch(path, { method: 'GET' }, this.apiOptions());
 
       if (response.status === 304) {
-        return { envelopes: all, cursor: currentCursor };
+        return { envelopes: all, cursor: formatCursor(latestSince, latestId) };
       }
 
       if (!response.ok) {
@@ -205,19 +238,21 @@ export class GitHubTransport implements Transport {
       if (comments.length === 0) break;
 
       for (const comment of comments) {
-        const parsed = this.readComment(comment);
-        if (!parsed) continue;
+        if (comment.id <= lastId) continue;
 
-        all.push(parsed);
-        if (!currentCursor || comment.created_at > currentCursor) {
-          currentCursor = comment.created_at;
+        const parsed = this.readComment(comment);
+        if (parsed) all.push(parsed);
+
+        if (!latestSince || comment.created_at > latestSince) {
+          latestSince = comment.created_at;
         }
+        if (comment.id > latestId) latestId = comment.id;
       }
 
       if (comments.length < 100) break;
       page++;
     }
 
-    return { envelopes: all, cursor: currentCursor };
+    return { envelopes: all, cursor: formatCursor(latestSince, latestId) };
   }
 }

@@ -12,7 +12,7 @@ import {
 } from '../src/github-auth.js';
 import { createEnvelope, renderEnvelope } from '../src/envelope.js';
 import { formatNotifierLine } from '../src/notifiers/index.js';
-import { GitHubTransport } from '../src/transports/github.js';
+import { GitHubTransport, parseCursor, formatCursor } from '../src/transports/github.js';
 import { resolveContext } from '../src/context.js';
 import { DiscordTransport } from '../src/transports/discord.js';
 
@@ -62,7 +62,7 @@ describe('GitHub identity override', () => {
     assert.equal(result.envelopes.length, 1);
     assert.equal(result.envelopes[0]!.from.dev, 'real-ana');
     assert.deepEqual(mismatches, ['fake-ana->real-ana']);
-    assert.equal(result.cursor, '2026-09-16T12:01:00Z');
+    assert.equal(result.cursor, '2026-09-16T12:01:00Z|42');
   });
 });
 
@@ -100,7 +100,7 @@ describe('GitHub pagination and 304', () => {
 
     const result = await transport.fetchAllSince(null);
     assert.equal(result.envelopes.length, 101);
-    assert.equal(result.cursor, '2026-09-16T12:02:00Z');
+    assert.equal(result.cursor, '2026-09-16T12:02:00Z|101');
   });
 
   it('returns no envelopes and keeps cursor on 304', async () => {
@@ -216,5 +216,53 @@ describe('legacy Discord config', () => {
       globalThis.fetch = originalFetch;
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('GitHub cursor is exclusive', () => {
+  // `since` is inclusive on GitHub, so a timestamp-only cursor hands the
+  // boundary comment back on every poll: a repeated toast per message, and a
+  // second headless answerer for a question the first is still answering.
+  it('does not redeliver the comment sitting on the cursor', async () => {
+    const envelope = createEnvelope(
+      { type: 'fyi', subject: 'once' },
+      { dev: 'ana', agent: 'cursor', repo: 'acme-api' },
+    );
+    const { content } = renderEnvelope(envelope);
+    const comment = {
+      id: 500,
+      body: content,
+      user: { login: 'ana' },
+      created_at: '2026-09-16T12:00:00Z',
+    };
+
+    const fetchFn = mock.fn(
+      async () => new Response(JSON.stringify([comment]), { status: 200 }),
+    ) as typeof fetch;
+
+    const transport = new GitHubTransport({
+      repo: 'acme/acme-api',
+      issue: 7,
+      token: 'gh-test',
+      fetchFn,
+    });
+
+    const first = await transport.fetchSince(null);
+    assert.equal(first.envelopes.length, 1);
+
+    const second = await transport.fetchSince(first.cursor);
+    assert.equal(second.envelopes.length, 0, 'el mismo comentario no se entrega dos veces');
+  });
+
+  it('keeps reading a pre-0.5.1 timestamp-only cursor', () => {
+    assert.deepEqual(parseCursor('2026-09-16T12:00:00Z'), {
+      since: '2026-09-16T12:00:00Z',
+      lastId: 0,
+    });
+    assert.deepEqual(parseCursor('2026-09-16T12:00:00Z|42'), {
+      since: '2026-09-16T12:00:00Z',
+      lastId: 42,
+    });
+    assert.equal(formatCursor(null, 0), null);
   });
 });
