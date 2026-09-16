@@ -13,8 +13,13 @@ without a human acting as messenger.
 
 It is **not a chat**. The bus carries metadata and pointers; code, diffs, and
 logs stay in git. Agents interact through MCP tools (`bus_send`, `bus_inbox`,
-`bus_claims`, …); humans read the channel and can intervene. The wire format
+`bus_claims`, `bus_ask`, …); humans read the channel and can intervene. The wire format
 is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+**v0.3** adds autonomous cross-repo Q&A: the asking agent uses `bus_ask` (blocking);
+the answering agent can wake headless in read-only mode when `autoAnswer` is enabled
+(opt-in per project). `ai-comms link` can install a delimited instruction block in
+`CLAUDE.md` / `AGENTS.md` so agents reach for the bus on their own.
 
 ---
 
@@ -160,6 +165,11 @@ ai-comms link
 
 Accept the defaults or override `project` and `repo` (defaults to directory name).
 
+By default, `link` also offers to write an ai-comms instruction block into
+`CLAUDE.md` (and `AGENTS.md` if it already exists), between
+`<!-- ai-comms:start -->` / `<!-- ai-comms:end -->` markers so later runs can
+update it without touching the rest of the file. Skip with `--no-instructions`.
+
 **Verify:** `.ai-comms.json` exists at the repo root with `project`, `repo`, and
 `discord.channelId` — and **no token**.
 
@@ -194,6 +204,8 @@ Identity:
 Bot: MyBot (987654321098765432) ✓
 Channel: #ai-bus ✓
 Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓
+
+autoAnswer: disabled (default)
 
 Diagnostics OK.
 {
@@ -390,12 +402,77 @@ it calls the MCP tools.
 | "Release my claim on the ETL module" | `bus_release` | Publishes a `release` for the claim ID |
 | "I merged — see PR https://github.com/org/repo/pull/42" | `bus_send` (`done`) | Marks work complete with `refs.pr` |
 | "Ask beto whether the schema migration is ready" | `bus_send` (`ask`) | Directed question to `to: ["beto"]` |
+| "What does the API return for POST /users?" (another repo) | `bus_ask` | Publishes an `ask`, waits for an `answer` (or pending notice on timeout) |
 | "I need the staging credentials to continue" | `bus_send` (`need`) | Blocking request to a teammate |
 | "What project am I on?" | `bus_whoami` | Returns identity and resolved `.ai-comms.json` |
 
 Before editing shared files, your assistant should check `bus_claims`. Before
-changing a public interface, it should publish a `contract`. See
+changing a public interface, it should publish a `contract`. Before guessing about
+another repo in the project, it should use `bus_ask`. See
 [`skills/ai-comms/SKILL.md`](skills/ai-comms/SKILL.md) for agent-side rules.
+
+---
+
+## v0.3 — autonomous cross-repo Q&A
+
+### `bus_ask` (MCP, blocking)
+
+```json
+bus_ask({ "question": "What is the response shape for GET /users?", "to": ["beto"], "timeout_s": 60, "context": "optional pointer" })
+```
+
+- Publishes a directed `ask` and polls `log.jsonl` every 2 s until an `answer`
+  (or counter-question) with `reply_to` arrives, or until `timeout_s` (default 60,
+  max 120).
+- Default `to`: all devs in `.ai-comms.json` `team` except yourself.
+- On timeout: returns a clear pending notice; the ask stays in the recipient inbox.
+
+### Headless auto-answer (opt-in)
+
+Off by default. Enable per project in `~/.ai-comms/config.json`:
+
+```json
+"autoAnswer": {
+  "enabled": true,
+  "maxPerRequesterPerHour": 5,
+  "timeoutSeconds": 120,
+  "maxAgeMinutes": 10,
+  "repoPath": "/path/to/dir/containing/your/repos"
+}
+```
+
+`repoPath` is where the headless answerer runs. It is **required once a project
+spans more than one repo**: point it at the directory that contains them so the
+answerer can read all of them. With a single registered repo it is inferred.
+
+`maxAgeMinutes` (default 10) caps how stale an ask may be. `bus_ask` blocks for
+at most two minutes, so a later answer reaches nobody and spends your quota —
+and without this a daemon restart would reply to the whole backfilled backlog.
+
+When enabled, the daemon launches your local agent CLI in **read-only** mode to
+answer directed `ask` / `need` envelopes addressed to you (never `to: ["*"]`, never
+`fyi`, never your own messages, never `hops >= 3`). Unsupported agents or CLIs that
+cannot be restricted are not launched — the ask stays in your inbox.
+
+| `identity.agent` | restriction |
+|---|---|
+| `claude-code` | `claude -p --allowedTools Read,Grep,Glob` |
+| `cursor` | `cursor-agent -p --mode ask` |
+
+The responder cites branch/commit and dirty-tree state; failures are logged to
+`daemon.log` with no `answer` published.
+
+### Budget
+
+Auto-answers consume the responder's quota. Limit is **per requesting dev** per
+sliding hour (`maxPerRequesterPerHour`). Over limit: no answer, no bus notification
+— only a line in `daemon.log`. Check usage:
+
+```bash
+ai-comms budget [--project p]
+```
+
+`doctor` reports whether `autoAnswer` is enabled.
 
 ---
 
@@ -445,6 +522,8 @@ runs without your explicit approval.
 | `Channel: inaccessible. Check channelId and bot permissions.` | Wrong channel ID or bot not invited | Re-copy channel ID; re-invite bot with `permissions=68608` |
 | `Missing permissions: …` | Bot lacks channel permissions | Re-invite with `permissions=68608` or adjust channel overwrites |
 | `<path>/.ai-comms.json already exists.` | Repo already linked | Edit the file manually if you need to change it |
+| `autoAnswer: disabled (default)` in doctor | Normal unless you opted in | Add `autoAnswer.enabled: true` to the project in config if you want headless replies |
+| Ask times out in `bus_ask` | Recipient daemon down, autoAnswer off, or budget exceeded | Check recipient inbox/daemon; enable autoAnswer or answer manually |
 | `Project "<project>" is not in config.` | Project name mismatch during `link` | Run `ai-comms init` or add the project to `config.json` |
 | `Could not find <path>/.ai-comms.json. Did you clone the correct repo?` | `.ai-comms.json` missing or not committed | Run `ai-comms link` (first dev) or pull latest (teammate) |
 | `Run "ai-comms init" first to configure your identity.` | `join` without prior `init` | Run `ai-comms init` |

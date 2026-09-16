@@ -4,6 +4,7 @@ import { Client, GatewayIntentBits, type Message } from 'discord.js';
 import notifier from 'node-notifier';
 import type { ConfigV2 } from './config.js';
 import { loadConfig } from './config.js';
+import { runAutoAnswer } from './auto-answer.js';
 import { parseEnvelopeFromMessage, type Envelope } from './envelope.js';
 import { getEffectiveToken } from './secrets.js';
 import {
@@ -110,7 +111,7 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
 function processMessage(
   message: Message,
   project: string,
-  dev: string,
+  config: ConfigV2,
   verbose: boolean,
 ): void {
   const envelope = parseEnvelopeFromMessage(message.content);
@@ -123,7 +124,7 @@ function processMessage(
 
   saveCursor(project, { lastMessageId: message.id });
 
-  ingestEnvelope(envelope, project, dev);
+  ingestEnvelope(envelope, project, config.identity.dev, config, verbose);
 }
 
 /** Persist every valid envelope; notify only for messages from other devs. */
@@ -131,8 +132,16 @@ export function ingestEnvelope(
   envelope: Envelope,
   project: string,
   dev: string,
+  config?: ConfigV2,
+  verbose = false,
 ): { notified: boolean } {
   appendEnvelope(envelope, project);
+
+  if (config) {
+    void runAutoAnswer(envelope, project, config, (message) => {
+      daemonLog(project, message, verbose);
+    });
+  }
 
   if (envelope.from.dev === dev) return { notified: false };
 
@@ -156,7 +165,7 @@ async function backfillHistory(
   client: Client,
   channelId: string,
   project: string,
-  dev: string,
+  config: ConfigV2,
   verbose: boolean,
 ): Promise<void> {
   const channel = await client.channels.fetch(channelId);
@@ -199,7 +208,7 @@ async function backfillHistory(
   const sorted = sortById(collected);
 
   for (const msg of sorted) {
-    processMessage(msg, project, dev, verbose);
+    processMessage(msg, project, config, verbose);
   }
 
   if (sorted.length > 0) {
@@ -234,7 +243,7 @@ async function runClientForToken(
           client,
           binding.channelId,
           binding.project,
-          config.identity.dev,
+          config,
           verbose,
         );
       } catch (err) {
@@ -248,7 +257,7 @@ async function runClientForToken(
     const project = projectByChannel.get(message.channelId);
     if (!project) return;
     try {
-      processMessage(message, project, config.identity.dev, verbose);
+      processMessage(message, project, config, verbose);
     } catch (err) {
       daemonLog(project, `Error processing message: ${String(err)}`, verbose);
     }

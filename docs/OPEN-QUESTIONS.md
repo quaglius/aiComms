@@ -55,3 +55,47 @@ parsing. Extreme case; in normal use truncating `body` is enough.
 **Interpretation:** use `daemon.pid` + `process.kill(pid, 0)` and `log.jsonl`
 `mtime`. False positive if the bus is quiet but the daemon is alive; false
 negative if the pidfile is stale.
+
+---
+
+## v0.3
+
+Conservative interpretations applied. They do not change the envelope schema.
+
+### 1. `bus_ask` without `team` roster
+
+**Spec:** default `to` is all devs in `team` minus self.
+
+**Interpretation:** if `.ai-comms.json` `team` is empty or missing, `bus_ask`
+returns an error asking for explicit `to`. It does not fall back to `["*"]`.
+
+### 2. `bus_ask` and `need` vs `blocking`
+
+**Spec:** mentions publishing `need` when `blocking`.
+
+**Interpretation:** the v0.3 MCP signature has no `blocking` flag. `bus_ask`
+always publishes `type: "ask"`. Use `bus_send` with `type: "need"` for blocking
+requests that do not wait for a reply.
+
+### 3. Auto-answer repo cwd with multiple registered repos
+
+**Spec:** headless cwd is the repo path from `config.json`.
+
+**Interpretation:** auto-answer runs only when the project has **exactly one**
+registered repo in `projects[p].repos`. With zero or multiple repos, the daemon
+logs the reason and leaves the ask unanswered.
+
+### 4. Cursor read-only restriction
+
+**Spec:** `cursor-agent -p` with a read-only equivalent.
+
+**Interpretation:** launch with `--mode ask` (documented read-only). Do not pass
+`--force` / `--yolo`. If Cursor changes mode semantics, treat as unsupported and
+do not launch.
+
+### 5. `link` instruction prompt
+
+**Spec:** `link` offers to write the instruction block.
+
+**Interpretation:** interactive `link` prompts `[Y/n]` (default yes). `--no-instructions`
+skips the prompt and the write entirely.

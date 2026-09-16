@@ -121,6 +121,11 @@ npx @quaglius/ai-comms link
 - `project`: from step 3 (default: `defaultProject`)
 - `repo`: repo name (default: directory basename)
 
+By default, `link` also offers to write an ai-comms instruction block into
+`CLAUDE.md` (and `AGENTS.md` if present), between `<!-- ai-comms:start -->` and
+`<!-- ai-comms:end -->`. This tells the agent to use `bus_ask` before guessing
+about other repos. Skip with `--no-instructions`.
+
 **Verify:** `.ai-comms.json` was created at the repo root with `project`, `repo`, and `discord.channelId`. **No token.**
 
 ```bash
@@ -146,6 +151,7 @@ npx @quaglius/ai-comms doctor
 - `Bot: <username> ✓`
 - `Channel: #<name> ✓`
 - `Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓`
+- `autoAnswer: disabled (default)` or `enabled` with limits
 - `Diagnostics OK.`
 
 **If it fails:**
@@ -278,15 +284,54 @@ With two devs (A and B) and the daemon running on both machines:
 
 ---
 
+## Step 11 — v0.3 cross-repo Q&A (optional)
+
+### Enable headless auto-answer (opt-in)
+
+Auto-answer is **off by default**. To let the daemon reply to directed `ask` /
+`need` messages without a human in the loop, add to the project in
+`~/.ai-comms/config.json`:
+
+```json
+"autoAnswer": {
+  "enabled": true,
+  "maxPerRequesterPerHour": 5,
+  "timeoutSeconds": 120,
+  "maxAgeMinutes": 10,
+  "repoPath": "/path/to/dir/containing/your/repos"
+}
+```
+
+**Verify:** `ai-comms doctor` reports `autoAnswer: enabled`.
+
+**Security:** only `claude-code` and `cursor` are supported; both launch in
+read-only mode. Other agents are never launched automatically.
+
+### Test `bus_ask`
+
+From a linked repo with MCP connected:
+
+```
+bus_ask({ question: "Is feature X implemented on your side?", to: ["beto"] })
+```
+
+**Verify:** with autoAnswer enabled on beto's machine and daemon running, an
+`answer` appears on the channel with `reply_to` pointing at the ask.
+
+Check budget usage: `ai-comms budget`.
+
+---
+
 ## Quick reference commands
 
 | Command | Usage |
 |---|---|
 | `init` | First-time setup (identity + project) |
-| `link` | Create `.ai-comms.json` in the current repo |
+| `link [--no-instructions]` | Create `.ai-comms.json` in the current repo |
 | `join <path>` | Register a cloned repo |
 | `secret set <project>` | Save token (hidden prompt) |
 | `doctor [--project p]` | Full diagnostics |
+| `budget [--project p]` | Auto-answer budget for the current hour |
 | `daemon [--verbose]` | Listen on all projects |
 | `mcp` | MCP stdio server |
 | `inbox [--all] [--project p]` | Inbox in terminal |

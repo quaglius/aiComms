@@ -8,6 +8,7 @@ import {
   saveConfig,
   redactedContext,
   ConfigV2Schema,
+  resolveAutoAnswer,
 } from './config.js';
 import {
   contextResolutionError,
@@ -40,6 +41,8 @@ import {
   materializeInbox,
   markRead,
 } from './store.js';
+import { formatBudgetSnapshot, getBudgetSnapshot } from './budget.js';
+import { buildInstructionsBlock, writeInstructionsToRepo } from './instructions.js';
 
 async function runInit(): Promise<void> {
   console.log('ai-comms initial setup\n');
@@ -67,7 +70,7 @@ async function runInit(): Promise<void> {
   console.log('Then run "ai-comms link" in each repo and "ai-comms doctor" to verify.');
 }
 
-async function runLink(): Promise<void> {
+async function runLink(options: { noInstructions?: boolean } = {}): Promise<void> {
   const config = loadConfig();
   const cwd = process.cwd();
   const target = path.join(cwd, REPO_COMMS_FILENAME);
@@ -100,6 +103,28 @@ async function runLink(): Promise<void> {
   writeFileSync(target, JSON.stringify(repoComms, null, 2) + '\n', 'utf8');
   console.log(`Created ${target}`);
   console.log('Commit this file so your team can use it with "ai-comms join".');
+
+  if (options.noInstructions) return;
+
+  const writeInstructions = await prompt(
+    'Write ai-comms instructions to CLAUDE.md (and AGENTS.md if present)? [Y/n]',
+    'Y',
+  );
+  if (writeInstructions.toLowerCase() === 'n') return;
+
+  const repoNames = [
+    repo,
+    ...(projectConfig.repos ?? []).map((entry) => entry.name).filter((name) => name !== repo),
+  ];
+  const block = buildInstructionsBlock({
+    project,
+    repos: [...new Set(repoNames)],
+    team: repoComms.team ?? [],
+  });
+  const written = writeInstructionsToRepo(cwd, block);
+  for (const file of written) {
+    console.log(`Updated ${file}`);
+  }
 }
 
 async function runJoin(repoPath: string): Promise<void> {
@@ -235,6 +260,14 @@ async function runDoctor(projectOverride?: string): Promise<number> {
     }
     console.log('Permissions: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY ✓');
 
+    const autoAnswer = resolveAutoAnswer(config.projects[ctx.project]);
+    console.log(
+      `\nautoAnswer: ${autoAnswer.enabled ? 'enabled' : 'disabled (default)'}` +
+        (autoAnswer.enabled
+          ? ` (max ${autoAnswer.maxPerRequesterPerHour}/requester/h, timeout ${autoAnswer.timeoutSeconds}s)`
+          : ''),
+    );
+
     console.log('\nDiagnostics OK.');
     console.log(JSON.stringify(redactedContext(ctx), null, 2));
     return 0;
@@ -273,6 +306,14 @@ async function runInbox(all: boolean, projectOverride?: string): Promise<void> {
   console.log(`\n${inbox.length} message(s) marked as read.`);
 }
 
+async function runBudget(projectOverride?: string): Promise<void> {
+  const config = loadConfig();
+  const ctx = resolveContext(process.cwd(), config, { projectOverride });
+  const autoAnswer = resolveAutoAnswer(config.projects[ctx.project]);
+  const snapshot = getBudgetSnapshot(ctx.project, autoAnswer.maxPerRequesterPerHour);
+  console.log(formatBudgetSnapshot(snapshot));
+}
+
 async function runClaims(projectOverride?: string): Promise<void> {
   const config = loadConfig();
   const ctx = resolveContext(process.cwd(), config, { projectOverride });
@@ -303,8 +344,9 @@ program.command('init').description('Create identity and first project').action(
 program
   .command('link')
   .description('Create .ai-comms.json in the current repo')
-  .action(async () => {
-    await runLink();
+  .option('--no-instructions', 'Skip writing CLAUDE.md / AGENTS.md instructions block')
+  .action(async (opts: { noInstructions?: boolean }) => {
+    await runLink({ noInstructions: opts.noInstructions });
   });
 
 program
@@ -367,6 +409,14 @@ program
   .option('--project <p>', 'project')
   .action(async (opts: { project?: string }) => {
     await runClaims(opts.project);
+  });
+
+program
+  .command('budget')
+  .description('Show auto-answer budget usage for the current window')
+  .option('--project <p>', 'project')
+  .action(async (opts: { project?: string }) => {
+    await runBudget(opts.project);
   });
 
 program.parseAsync(process.argv).catch((err) => {

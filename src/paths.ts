@@ -39,6 +39,10 @@ export function getProjectDaemonPidPath(project: string): string {
   return path.join(getProjectDir(project), 'daemon.pid');
 }
 
+export function getProjectBudgetPath(project: string): string {
+  return path.join(getProjectDir(project), 'budget.json');
+}
+
 /** @deprecated v0 layout — migration only */
 export function getV0LogPath(): string {
   return path.join(getConfigDir(), 'log.jsonl');

@@ -17,9 +17,26 @@ const RepoEntrySchema = z.object({
   path: z.string().min(1),
 });
 
+const AutoAnswerConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    maxPerRequesterPerHour: z.number().int().positive().default(5),
+    timeoutSeconds: z.number().int().positive().max(120).default(120),
+    // Where the headless answerer runs. Required once a project has more than
+    // one repo: point it at the directory that contains them so the answerer
+    // can read all of them.
+    repoPath: z.string().min(1).optional(),
+    // An ask older than this is not worth answering: bus_ask blocks for at most
+    // two minutes, so a late answer reaches nobody and spends the responder's
+    // quota. Also stops a daemon restart from replying to a backlog.
+    maxAgeMinutes: z.number().int().positive().default(10),
+  })
+  .strict();
+
 const ProjectConfigSchema = z.object({
   discord: ProjectDiscordSchema,
   repos: z.array(RepoEntrySchema).optional(),
+  autoAnswer: AutoAnswerConfigSchema.optional(),
 });
 
 export const ConfigV2Schema = z.object({
@@ -31,6 +48,29 @@ export const ConfigV2Schema = z.object({
 
 export type ConfigV2 = z.infer<typeof ConfigV2Schema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+export type AutoAnswerConfig = z.infer<typeof AutoAnswerConfigSchema>;
+
+export interface ResolvedAutoAnswer {
+  enabled: boolean;
+  maxPerRequesterPerHour: number;
+  timeoutSeconds: number;
+  repoPath?: string;
+  maxAgeMinutes: number;
+}
+
+export function resolveAutoAnswer(projectConfig: ProjectConfig | undefined): ResolvedAutoAnswer {
+  const aa = projectConfig?.autoAnswer;
+  if (!aa?.enabled) {
+    return { enabled: false, maxPerRequesterPerHour: 5, timeoutSeconds: 120, maxAgeMinutes: 10 };
+  }
+  return {
+    enabled: true,
+    maxPerRequesterPerHour: aa.maxPerRequesterPerHour ?? 5,
+    timeoutSeconds: aa.timeoutSeconds ?? 120,
+    repoPath: aa.repoPath,
+    maxAgeMinutes: aa.maxAgeMinutes ?? 10,
+  };
+}
 
 /** @deprecated internal compatibility alias */
 export type Config = ConfigV2;
