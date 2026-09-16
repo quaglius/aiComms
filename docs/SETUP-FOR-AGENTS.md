@@ -52,7 +52,7 @@ https://discord.com/api/oauth2/authorize?client_id=APP_ID&permissions=68608&scop
 
 **Verify before continuing:** the bot appears in the server member list (offline is fine).
 
-**If it fails:** without the bot on the server, `doctor` will report "guild membership" or an inaccessible channel.
+**If it fails:** without the bot on the server, `doctor` will report `Channel: inaccessible. Check channelId and bot permissions.`
 
 ---
 
@@ -170,32 +170,84 @@ Follow [`INSTALL.md`](INSTALL.md) for the user's tool (Claude Code, Cursor, Code
 
 ## Step 8 — Start the daemon
 
+Test the daemon first:
+
 ```bash
 npx @quaglius/ai-comms daemon
 ```
 
-Leave it running in the background (tmux, systemd, or a dedicated terminal).
+Leave it running while you verify. Send a test message on the channel (or publish
+a claim via `bus_send`) and confirm the log updates.
 
-**Verify:** when a test message is sent on the channel, `~/.ai-comms/projects/<project>/log.jsonl` updates.
+**Verify:** `~/.ai-comms/projects/<project>/log.jsonl` updates when a message
+arrives on the channel.
 
 **If it fails:** without the daemon, the inbox may be stale (the MCP warns if the log is >5 min old).
+
+### Step 8b — Make the daemon permanent (delegate OS-specific steps)
+
+The daemon must run on every machine that uses the bus. Ask the user to pick
+their OS and follow the matching section in [`README.md`](../README.md#run-the-daemon-permanently).
+Summarize for them:
+
+**Windows (no admin required):** create a `.vbs` file in the Startup folder
+(`Win+R` → `shell:startup`) that runs `ai-comms daemon` hidden. This avoids
+needing administrator privileges.
+
+**macOS:** create a LaunchAgent plist in `~/Library/LaunchAgents/` with
+`ProgramArguments` pointing to `ai-comms daemon`, then `launchctl load` it.
+
+**Linux:** create a systemd user service at
+`~/.config/systemd/user/ai-comms-daemon.service` with `ExecStart` pointing to
+`ai-comms daemon` (or `npx @quaglius/ai-comms daemon`), then
+`systemctl --user enable --now ai-comms-daemon.service`.
+
+**Verify before continuing:** after a login or reboot, incoming channel messages
+still update `log.jsonl` without manually starting the daemon.
+
+**If it fails:** check that the binary path in the startup script is absolute
+and on PATH at login (`which ai-comms`). On Linux, ensure lingering is enabled
+if the user needs the daemon when not logged in:
+`loginctl enable-linger <username>`.
 
 ---
 
 ## Step 9 — Onboard a teammate
 
-The teammate clones the repo (it already has `.ai-comms.json`):
+`.ai-comms.json` is committed to git, so a teammate gets `project`, `repo`, and
+`channelId` from the clone. They do **not** run `link`.
+
+On the teammate's machine:
 
 ```bash
-npx @quaglius/ai-comms init          # identity only if no config yet
-npx @quaglius/ai-comms join /path/to/repo
+git clone <repo-url>
+cd <repo>
+
+npx @quaglius/ai-comms init          # only if ~/.ai-comms/config.json does not exist
+npx @quaglius/ai-comms join .
 npx @quaglius/ai-comms secret set <project>
 npx @quaglius/ai-comms doctor
 ```
 
-**Verify:** `doctor` passes with their own `dev` and the same `project`/`channelId`.
+During `init`, the teammate picks their own `dev` slug and `agent`. The
+`project` name must match the team's.
 
-**If it fails:** "Could not find .ai-comms.json" → wrong directory cloned or file not committed.
+They also need:
+
+1. MCP configured per [`INSTALL.md`](INSTALL.md) (step 7).
+2. The daemon running permanently (step 8b) on their machine.
+
+**Verify:** `doctor` passes with their own `dev` and the same `project` /
+`channelId` as the rest of the team.
+
+**If it fails:**
+
+| Error | Action |
+|---|---|
+| `Could not find .ai-comms.json` | Wrong directory, or file not committed/pushed |
+| `Run "ai-comms init" first` | Teammate skipped `init` |
+| `No token for project` | Teammate skipped `secret set` |
+| Teammate's inbox is empty/stale | Teammate's daemon is not running |
 
 ---
 
