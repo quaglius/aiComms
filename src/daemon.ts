@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { Client } from 'discord.js';
 import notifier from 'node-notifier';
 import type { ConfigV2 } from './config.js';
@@ -63,6 +64,24 @@ function shouldNotify(envelope: Envelope, dev: string): boolean {
   return true;
 }
 
+/**
+ * Our own icon for desktop notifications.
+ *
+ * Windows delivers these through SnoreToast, so the toast carries that app's
+ * name and its default icon — which reads as something unrelated and gets
+ * ignored. Renaming the app needs a registered AppUserModelID, and an
+ * unregistered one makes Windows drop the toast silently, so the icon is the
+ * part we can fix without risking the notification itself.
+ */
+const NOTIFICATION_ICON = (() => {
+  try {
+    const require = createRequire(import.meta.url);
+    return require.resolve('../assets/icon.png');
+  } catch {
+    return undefined;
+  }
+})();
+
 function notifyEnvelope(envelope: Envelope, dev: string): void {
   const sound =
     (envelope.type === 'need' || envelope.type === 'ask') &&
@@ -78,6 +97,7 @@ function notifyEnvelope(envelope: Envelope, dev: string): void {
       message,
       sound: sound ? true : false,
       wait: false,
+      icon: NOTIFICATION_ICON,
     });
   } catch {
     // ignore
@@ -97,6 +117,7 @@ function notifyAutoAnswerFailure(message: string): void {
       message: `${message.slice(0, 160)} — your teammate got no reply. Check that your agent CLI is still signed in.`,
       sound: false,
       wait: false,
+      icon: NOTIFICATION_ICON,
     });
   } catch {
     // ignore

@@ -56,6 +56,7 @@
     "docs",
     ".claude-plugin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets"
   ]
 }
