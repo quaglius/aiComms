@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import {
@@ -48,7 +48,7 @@ import { buildInstructionsBlock, writeInstructionsToRepo } from './instructions.
 import { createTransport } from './transports/index.js';
 import { isDiscordBus, isGitHubBus } from './transports/types.js';
 import { getRepoCollaborators } from './collaborators.js';
-import { runSetup } from './setup.js';
+import { runSetup, writeMcpConfig } from './setup.js';
 
 async function runInit(): Promise<void> {
   console.log('ai-comms initial setup (legacy Discord)\n');
@@ -75,24 +75,6 @@ async function runInit(): Promise<void> {
   console.log(`\nConfig saved to ~/.ai-comms/config.json`);
   console.log(`Run "ai-comms secret set ${project}" to store the bot token.`);
   console.log('Then run "ai-comms link" in each repo and "ai-comms doctor" to verify.');
-}
-
-function writeMcpConfig(cwd: string): void {
-  const target = path.join(cwd, '.mcp.json');
-  if (existsSync(target)) {
-    console.log(`${target} already exists — left untouched.`);
-    return;
-  }
-  const config = {
-    mcpServers: {
-      'ai-comms': {
-        command: 'npx',
-        args: ['-y', `@quaglius/ai-comms@${PACKAGE_VERSION}`, 'mcp'],
-      },
-    },
-  };
-  writeFileSync(target, JSON.stringify(config, null, 2) + '\n', 'utf8');
-  console.log(`Created ${target} (pinned to ${PACKAGE_VERSION})`);
 }
 
 async function runLink(options: { noInstructions?: boolean } = {}): Promise<void> {
@@ -215,11 +197,35 @@ async function runDoctor(projectOverride?: string): Promise<number> {
         const collaborators = await getRepoCollaborators(ctx.bus.repo);
         console.log(`\nCollaborators: ${collaborators.length} (${collaborators.slice(0, 5).join(', ')}${collaborators.length > 5 ? ', …' : ''}) ✓`);
       } catch (err) {
-        console.error(`\nCollaborators: could not list (${String(err)})`);
-        return 1;
+        // Listing collaborators requires write/maintain/admin on the repo
+        // (GitHub's API, not ours). A teammate with only read/triage access
+        // gets a 403 here — that is not broken, so it must not fail doctor.
+        console.log(`\n⚠ Collaborators: could not list (${String(err)})`);
       }
 
       console.log(`\nBus: GitHub issue #${ctx.bus.issue} on ${ctx.bus.repo} ✓`);
+
+      const mcpDir = ctx.repoCommsPath ? path.dirname(ctx.repoCommsPath) : process.cwd();
+      const mcpConfigPath = path.join(mcpDir, '.mcp.json');
+      let mcpRegistered = false;
+      if (existsSync(mcpConfigPath)) {
+        try {
+          const raw = JSON.parse(readFileSync(mcpConfigPath, 'utf8')) as {
+            mcpServers?: Record<string, unknown>;
+          };
+          mcpRegistered = Boolean(raw.mcpServers?.['ai-comms']);
+        } catch {
+          mcpRegistered = false;
+        }
+      }
+      if (mcpRegistered) {
+        console.log(`MCP: ${mcpConfigPath} registers ai-comms ✓`);
+      } else {
+        console.log(
+          `\n⚠ MCP: ${mcpConfigPath} does not register the ai-comms server. Run "ai-comms setup" ` +
+            `again, or add it by hand (see docs/INSTALL.md).`,
+        );
+      }
     }
 
     if (isDiscordBus(ctx.bus)) {
@@ -373,8 +379,9 @@ program
   .description('Configure this repo for GitHub bus (no required prompts)')
   .option('--project <name>', 'Join an existing project instead of using the repo name')
   .option('--bus <owner/repo#issue>', 'Join an existing bus instead of creating one')
-  .action(async (opts: { project?: string; bus?: string }) => {
-    await runSetup({ project: opts.project, bus: opts.bus });
+  .option('--allow-public', 'Allow a public repo as the bus (private is required by default)')
+  .action(async (opts: { project?: string; bus?: string; allowPublic?: boolean }) => {
+    await runSetup({ project: opts.project, bus: opts.bus, allowPublic: opts.allowPublic });
     const code = await runDoctor();
     process.exitCode = code;
   });
