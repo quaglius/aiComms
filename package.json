@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "node -e \"const{execFileSync}=require('child_process');const{readdirSync}=require('fs');const files=readdirSync('test').filter(f=>f.endsWith('.test.ts')).map(f=>'test/'+f);execFileSync(process.execPath,[require.resolve('tsx/cli'),'--test',...files],{stdio:'inherit'})\"",
+    "test": "node scripts/run-tests.mjs",
     "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
