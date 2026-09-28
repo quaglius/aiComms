@@ -57,7 +57,7 @@ function withTempHome(fn: (home: string) => void | Promise<void>): Promise<void>
       else delete process.env.HOME;
       if (ORIGINAL_USERPROFILE) process.env.USERPROFILE = ORIGINAL_USERPROFILE;
       else delete process.env.USERPROFILE;
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
 }
 
@@ -389,7 +389,7 @@ describe('instructions block', () => {
     assert.equal((content.match(new RegExp(INSTRUCTIONS_START, 'g')) ?? []).length, 1);
     assert.match(content, /# Title/);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 });
 

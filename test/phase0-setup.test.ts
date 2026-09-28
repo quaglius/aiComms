@@ -51,7 +51,7 @@ async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise
   try {
     return await fn(home);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 
@@ -320,7 +320,7 @@ describe('D6 — writeMcpConfig merges instead of leaving an existing file untou
       assert.equal(result.mcpServers['ai-comms'].command, 'npx');
       assert.ok(result.mcpServers['ai-comms'].args.includes('mcp'));
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -335,7 +335,7 @@ describe('D6 — writeMcpConfig merges instead of leaving an existing file untou
 
       assert.equal(readFileSync(target, 'utf8'), original);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -371,7 +371,7 @@ describe('B4 — daemon autostart', () => {
         args: ['--user', 'enable', '--now', 'ai-comms-daemon.service'],
       });
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -406,7 +406,7 @@ describe('B4 — daemon autostart', () => {
         ),
       );
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -422,7 +422,7 @@ describe('B4 — daemon autostart', () => {
       const servicePath = path.join(home, '.config', 'systemd', 'user', 'ai-comms-daemon.service');
       assert.ok(existsSync(servicePath), 'the unit file should still be written');
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -432,7 +432,7 @@ describe('B4 — daemon autostart', () => {
       await offerDaemonInstall({ answer: 'n', platform: 'linux', home, execFn: () => {} });
       assert.equal(existsSync(path.join(home, '.config', 'systemd', 'user')), false);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

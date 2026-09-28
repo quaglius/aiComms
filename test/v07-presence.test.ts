@@ -70,7 +70,7 @@ async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise
   try {
     return await fn(home);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 
@@ -505,7 +505,7 @@ describe('codeowners — loadCodeowners', () => {
     try {
       assert.equal(loadCodeowners(repo), null);
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -521,7 +521,7 @@ describe('codeowners — loadCodeowners', () => {
       const rules = loadCodeowners(repo);
       assert.deepEqual(rules, [{ pattern: '*', owners: ['from-github'] }]);
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -532,7 +532,7 @@ describe('codeowners — loadCodeowners', () => {
       writeFileSync(path.join(repo, 'docs', 'CODEOWNERS'), '/src/ @doc-owner\n', 'utf8');
       assert.deepEqual(loadCodeowners(repo), [{ pattern: '/src/', owners: ['doc-owner'] }]);
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -551,7 +551,7 @@ describe('codeowners — loadCodeowners', () => {
       );
       assert.deepEqual(loadCodeowners(repo), [{ pattern: '/src/api/', owners: ['ana'] }]);
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

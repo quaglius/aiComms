@@ -45,7 +45,7 @@ async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise
   try {
     return await fn(home);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 
@@ -387,7 +387,11 @@ describe('computeAutoAnswerConfig', () => {
   it('overrides repoPath only when one is explicitly passed', () => {
     const prev = { enabled: true, maxPerRequesterPerHour: 5, timeoutSeconds: 120, maxAgeMinutes: 10, repoPath: '/old' };
     const result = computeAutoAnswerConfig(prev, false, '/new');
-    assert.equal(result.repoPath, '/new');
+    // computeAutoAnswerConfig runs the passed repoPath through path.resolve()
+    // (see its doc comment), which is a no-op on POSIX but turns a bare
+    // `/new` into a drive-absolute `D:\new` on Windows — so the expectation
+    // has to go through the same resolution rather than assume POSIX form.
+    assert.equal(result.repoPath, path.resolve('/new'));
     assert.equal(result.enabled, false);
   });
 
@@ -417,7 +421,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.equal(userPromptCmd, '/usr/bin/node /opt/ai-comms/bin/ai-comms.js hook user-prompt');
       assert.equal(settings.hooks.SessionStart[0].hooks[0].timeout, 10);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -434,7 +438,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.equal(settings.hooks.SessionStart.length, 1);
       assert.equal(settings.hooks.SessionStart[0].hooks.length, 1);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -459,7 +463,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.ok(settings.hooks.SessionStart);
       assert.ok(settings.hooks.UserPromptSubmit);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -474,7 +478,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.ok(result.failed);
       assert.equal(readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'), original);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -502,7 +506,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, 'echo something-else');
       assert.equal(settings.hooks.SessionStart, undefined);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -513,7 +517,7 @@ describe('installClaudeHooks / uninstallClaudeHooks', () => {
       assert.deepEqual(result.removed, []);
       assert.equal(existsSync(result.settingsPath), false);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -537,7 +541,7 @@ describe('registerMcpForAgents — Claude Code', () => {
       const claude = results.find((r) => r.agent === 'claude-code')!;
       assert.equal(claude.status, 'skipped');
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -571,7 +575,7 @@ describe('registerMcpForAgents — Claude Code', () => {
         'mcp',
       ]);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -600,7 +604,7 @@ describe('registerMcpForAgents — Claude Code', () => {
       assert.ok(calls.some((c) => c[1] === 'mcp' && c[2] === 'remove'));
       assert.equal(addCalls, 2);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -617,7 +621,7 @@ describe('registerMcpForAgents — Claude Code', () => {
       assert.equal(claude.status, 'failed');
       assert.ok(claude.detail.includes('claude mcp add --scope user ai-comms'));
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -630,7 +634,7 @@ describe('registerMcpForAgents — Cursor / Gemini CLI (JSON merge)', () => {
       assert.equal(results.find((r) => r.agent === 'cursor')!.status, 'skipped');
       assert.equal(results.find((r) => r.agent === 'gemini-cli')!.status, 'skipped');
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -650,7 +654,7 @@ describe('registerMcpForAgents — Cursor / Gemini CLI (JSON merge)', () => {
       const mcpJson = JSON.parse(readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'));
       assert.ok(mcpJson.mcpServers['ai-comms'].args.includes('@quaglius/ai-comms@0.7.1'));
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -671,7 +675,7 @@ describe('registerMcpForAgents — Cursor / Gemini CLI (JSON merge)', () => {
       assert.deepEqual(settings.mcpServers.other, { command: 'foo' });
       assert.equal(settings.mcpServers['ai-comms'].command, 'npx');
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -686,7 +690,7 @@ describe('registerMcpForAgents — Cursor / Gemini CLI (JSON merge)', () => {
       assert.equal(results.find((r) => r.agent === 'cursor')!.status, 'failed');
       assert.equal(readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'), original);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -698,7 +702,7 @@ describe('registerMcpForAgents — Codex (config.toml textual edit)', () => {
       const results = registerMcpForAgents({ home, which: () => false, version: '0.7.0' });
       assert.equal(results.find((r) => r.agent === 'codex')!.status, 'skipped');
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -712,7 +716,7 @@ describe('registerMcpForAgents — Codex (config.toml textual edit)', () => {
       assert.match(content, /\[mcp_servers\.ai-comms\]/);
       assert.match(content, /@quaglius\/ai-comms@0\.7\.0/);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -743,7 +747,7 @@ describe('registerMcpForAgents — Codex (config.toml textual edit)', () => {
       assert.match(content, /@quaglius\/ai-comms@0\.7\.0/);
       assert.ok(!content.includes('@quaglius/ai-comms@0.6.0'));
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -759,7 +763,7 @@ describe('registerMcpForAgents — Codex (config.toml textual edit)', () => {
       const after2 = readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
       assert.equal(after1, after2);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 

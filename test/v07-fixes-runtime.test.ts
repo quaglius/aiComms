@@ -65,7 +65,7 @@ async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise
   try {
     return await fn(home);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 

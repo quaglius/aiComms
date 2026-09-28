@@ -38,7 +38,7 @@ function withTempHome(fn: (home: string) => void | Promise<void>): Promise<void>
       else delete process.env.HOME;
       if (ORIGINAL_USERPROFILE) process.env.USERPROFILE = ORIGINAL_USERPROFILE;
       else delete process.env.USERPROFILE;
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
 }
 

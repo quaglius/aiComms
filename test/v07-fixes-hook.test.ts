@@ -37,6 +37,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import {
   AutoAnswerConfigError,
@@ -76,8 +77,16 @@ async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise
   try {
     return await fn(home);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
+}
+
+/** Escapes regex metacharacters — including `\`, so a Windows path like
+ *  `C:\...\repo` (whose `\r` would otherwise read as a carriage-return
+ *  escape, `\R`/`\U`/etc. as stray literals) can be dropped into
+ *  `new RegExp()` and match itself literally. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function writeUserConfig(
@@ -277,7 +286,12 @@ describe('runHook — notice-claiming lock (finding 4a)', () => {
 
       const harnessDir = mkdtempSync(path.join(tmpdir(), 'ai-comms-fix-lock-harness-'));
       const harnessFile = path.join(harnessDir, 'run-hook.mts');
-      const hookSrc = path.resolve('src/hook.js');
+      // A raw OS-native absolute path (e.g. `D:\a\...\hook.js`) is not a
+      // valid ESM import specifier on Windows — Node's resolver reads the
+      // drive letter as a URL scheme and throws ERR_UNSUPPORTED_ESM_URL_SCHEME
+      // ("Received protocol 'd:'"). Converting to a `file://` URL first
+      // works identically on every platform.
+      const hookSrc = pathToFileURL(path.resolve('src/hook.js')).href;
       writeFileSync(
         harnessFile,
         [
@@ -314,7 +328,7 @@ describe('runHook — notice-claiming lock (finding 4a)', () => {
         const state = JSON.parse(readFileSync(hookStatePath('acme'), 'utf8'));
         assert.deepEqual(state.notified, ['RACE1']);
       } finally {
-        rmSync(harnessDir, { recursive: true, force: true });
+        rmSync(harnessDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       }
     });
   });
@@ -543,7 +557,7 @@ describe('autoanswer on — repo-path requirement (finding 6)', () => {
       const env = { ...process.env, HOME: home, USERPROFILE: home };
       const r = runCli(['autoanswer', 'on', '--repo-path', '.'], env, repoDir);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, new RegExp(`repoPath=${path.resolve(repoDir)}`));
+      assert.match(r.stdout, new RegExp(`repoPath=${escapeRegExp(path.resolve(repoDir))}`));
       assert.match(r.stdout, /The running daemon picks this up within a minute\./);
 
       const saved = JSON.parse(readFileSync(path.join(home, '.ai-comms', 'config.json'), 'utf8'));
