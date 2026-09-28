@@ -44,7 +44,7 @@ the MCP, the skill, and the `/bus:claim`, `/bus:inbox`, `/bus:claims` commands.
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["-y", "@quaglius/ai-comms@0.5.1", "mcp"]
+      "args": ["-y", "@quaglius/ai-comms@0.6.0", "mcp"]
     }
   }
 }

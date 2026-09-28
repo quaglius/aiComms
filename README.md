@@ -17,7 +17,7 @@ logs stay in git. Agents interact through MCP tools (`bus_send`, `bus_inbox`,
 Discord notifications). The wire format is documented in
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
-**v0.5** uses a **GitHub issue** as the default bus: each comment is one
+ai-comms uses a **GitHub issue** as the default bus: each comment is one
 envelope, identity comes from the authenticated GitHub author, and there is no
 bot token to share. Discord remains supported for legacy setups and as an
 optional one-way notifier (webhook).
@@ -38,9 +38,9 @@ Legacy Discord setups still need a Discord bot — see
 
 ---
 
-## Quick start (v0.5 — GitHub bus)
+## Quick start (GitHub bus)
 
-Inside a git repo:
+Inside a git repo whose `origin` is a **private** GitHub repo:
 
 ```bash
 npx @quaglius/ai-comms setup
@@ -51,10 +51,14 @@ prompts**. It:
 
 1. Reads `origin` → `owner/repo`
 2. Uses `gh auth token` → your GitHub login is your identity
-3. Finds or offers to create an open issue labeled `ai-comms-bus`
-4. Writes `.ai-comms.json`, a pinned `.mcp.json`, and agent instructions
-5. Offers to install the daemon at login
-6. Runs `doctor`
+3. Refuses a public repo (everything on the bus would be public and anyone
+   could post to it) unless you pass `--allow-public`
+4. Finds or offers to create an open issue labeled `ai-comms-bus`, and locks
+   it so only people with write access can post
+5. Writes `.ai-comms.json`, registers ai-comms in `.mcp.json` (merged into an
+   existing file), and adds agent instructions
+6. Offers to install the daemon at login, and starts it
+7. Runs `doctor`
 
 **Verify:** `doctor` ends with `Diagnostics OK.`
 
@@ -65,10 +69,20 @@ Commit `.ai-comms.json` and `.mcp.json` so teammates get them on clone.
 ```bash
 git clone <repo-url>
 cd <repo>
-npx @quaglius/ai-comms setup   # detects existing .ai-comms.json
+npx @quaglius/ai-comms setup   # reuses the committed .ai-comms.json as is
 ```
 
-Each person uses their own `gh` login — no shared tokens.
+Each person uses their own `gh` login — no shared tokens. A committed
+`.ai-comms.json` is never rewritten by `setup`.
+
+### Several repos, one project
+
+The first repo creates the bus. In every other repo, join it instead of
+creating a new one:
+
+```bash
+npx @quaglius/ai-comms setup --project acme --bus acme/api#42
+```
 
 ---
 
@@ -94,8 +108,11 @@ Platform-specific paths: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ## Run the daemon
 
-The daemon polls the GitHub bus (every 15 s) and writes envelopes to
-`~/.ai-comms/projects/<project>/log.jsonl`. Without it, `bus_inbox` may be stale.
+The daemon polls the GitHub bus (every 15 s), writes envelopes to
+`~/.ai-comms/projects/<project>/log.jsonl`, shows desktop notifications, and
+runs auto-answer. Only one daemon runs per machine. `bus_ask` reads replies
+straight from GitHub, so asking works without it; without it, `bus_inbox`
+may be stale and nobody answers on your behalf while you are away.
 
 ```bash
 ai-comms daemon
@@ -120,7 +137,7 @@ Store the webhook URL in `~/.ai-comms/secrets.json` (not in the repo).
 
 ---
 
-## Identity (v0.5 principle)
+## Identity
 
 **The transport provides identity, never the message payload.**
 
@@ -140,7 +157,7 @@ truth.
 | "Is anyone working on `src/analytics`?" | `bus_claims` | Lists active claims |
 | "I'm taking `src/etl/**` until tomorrow" | `bus_send` (`claim`) | Publishes a claim |
 | "What's new on the bus?" | `bus_inbox` | Envelopes addressed to you |
-| "Ask beto whether the migration is ready" | `bus_ask` | Directed ask, waits for answer |
+| "Ask beto whether the migration is ready" | `bus_ask` (`to: ["beto"]`) | Directed ask, waits for answer; `to` is required unless there is only one teammate |
 | "What project am I on?" | `bus_whoami` | Identity + resolved config |
 
 Before editing shared files, check `bus_claims`. Before changing a public

@@ -1,6 +1,6 @@
 {
   "name": "ai-comms",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Team AI agent coordination channel over a GitHub issue (with optional legacy Discord notifications)",
   "author": {
     "name": "quaglius"
@@ -8,7 +8,7 @@
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["-y", "@quaglius/ai-comms@0.5.1", "mcp"]
+      "args": ["-y", "@quaglius/ai-comms@0.6.0", "mcp"]
     }
   }
 }
