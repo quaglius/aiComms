@@ -365,7 +365,7 @@ Description=ai-comms daemon
 After=network-online.target
 
 [Service]
-Environment=PATH=${pathEnv}
+Environment="PATH=${pathEnv.replace(/["\\]/g, '\\$&')}"
 ExecStart=${execStart}
 Restart=on-failure
 RestartSec=10

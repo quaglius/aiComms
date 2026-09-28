@@ -340,7 +340,7 @@ describe('B4 — daemon autostart', () => {
       const servicePath = path.join(home, '.config', 'systemd', 'user', 'ai-comms-daemon.service');
       assert.ok(existsSync(servicePath));
       const content = readFileSync(servicePath, 'utf8');
-      assert.match(content, /Environment=PATH=/);
+      assert.match(content, /Environment="PATH=/);
       assert.match(content, /^ExecStart=\S/m);
       // Whatever the resolved command is (node+bin, or npx as a fallback),
       // it must be absolute — never the bare `ai-comms` that requires a
