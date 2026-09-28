@@ -259,6 +259,18 @@ export function resolveContext(
       if (fromUser) {
         return buildUserConfigContext(cfg, project, fromUser.repo, fromUser.bus, fromUser.githubRepo, null);
       }
+      // §3.3-style fallback: the override names a project with its own bus
+      // in user config but no registered repo path matches cwd — the normal
+      // case for a team space, which has no repos at all (spec §3.1). Rather
+      // than refuse just because the cwd happens to sit under a *different*
+      // project's committed .ai-comms.json, derive repo/bus for the override
+      // project the same way resolveContext does when there is no
+      // repoCommsPath in play to begin with. This is what let the daemon,
+      // the auto-answer sender and doctor bind to a space from a repo whose
+      // own .ai-comms.json names an unrelated product project (review
+      // finding #3) — without it every poll failed for that space.
+      const fallback = resolveDefaultProjectFallback(cwd, cfg, project);
+      if (fallback) return fallback;
       throw new ContextError(
         `Project "${options.projectOverride}" does not match ${repoCommsPath} ` +
           `(project=${repoComms.project}).`,

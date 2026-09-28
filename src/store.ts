@@ -1,7 +1,9 @@
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   statSync,
@@ -61,6 +63,87 @@ export interface ClaimConflict {
 
 function ensureProjectDir(project: string): void {
   mkdirSync(getProjectDir(project), { recursive: true });
+}
+
+// --- cross-process log lock --------------------------------------------------
+//
+// `appendEnvelope` (the MCP server, the daemon's ingest) and `compactLog`
+// (the daemon, on startup and every 24h) run in separate processes against
+// the same log file. Without coordination, an append landing between
+// `compactLog`'s read and its rename-over-the-original is silently lost —
+// the rewritten file never had it. This is a plain lockfile, not a
+// language-level mutex, precisely so it also holds across processes.
+
+const LOCK_STALE_MS = 10_000;
+const LOCK_MAX_WAIT_MS = 2_000;
+const LOCK_RETRY_DELAY_MS = 20;
+
+/** One-int scratch buffer reused across calls purely as something for
+ *  `Atomics.wait` to block on — its value is never read or written. Node
+ *  (unlike a browser main thread) allows `Atomics.wait` outside a worker, so
+ *  this gives a real, synchronous sleep without spinning the CPU. */
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepMs(ms: number): void {
+  Atomics.wait(sleepBuffer, 0, 0, ms);
+}
+
+function getLogLockPath(project: string): string {
+  return path.join(getProjectDir(project), '.log.lock');
+}
+
+/**
+ * Acquires the cross-process lock for `project`'s log file, retrying for up
+ * to {@link LOCK_MAX_WAIT_MS}, and returns a function that releases it.
+ *
+ * `openSync(path, 'wx')` fails with `EEXIST` if the lock file already
+ * exists, which is what makes acquiring it atomic — of two processes racing
+ * to create it, only one succeeds. A lock file older than
+ * {@link LOCK_STALE_MS} is assumed abandoned by a process that crashed
+ * before its `finally` could release it, and is taken over rather than
+ * waited out. If the wait still times out (lock genuinely held, contended)
+ * this returns a no-op release rather than blocking forever — callers must
+ * not hang because of this lock; `compactLog`'s own re-read-before-rename
+ * step is the second line of defense for exactly that case.
+ */
+function acquireLogLock(project: string): () => void {
+  ensureProjectDir(project);
+  const lockPath = getLogLockPath(project);
+  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+
+  for (;;) {
+    try {
+      closeSync(openSync(lockPath, 'wx'));
+      return () => {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // Already gone (e.g. taken over as stale by someone else) — fine.
+        }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+
+    try {
+      const age = Date.now() - statSync(lockPath).mtimeMs;
+      if (age > LOCK_STALE_MS) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // Raced with its real owner releasing it — loop and retry.
+        }
+        continue;
+      }
+    } catch {
+      // Lock file vanished between the failed open and this stat — its
+      // owner just released it; loop and retry immediately.
+      continue;
+    }
+
+    if (Date.now() >= deadline) return () => {};
+    sleepMs(LOCK_RETRY_DELAY_MS);
+  }
 }
 
 /**
@@ -137,13 +220,18 @@ export function appendEnvelope(
   project: string,
   existing?: Envelope[],
 ): boolean {
-  const logPath = getProjectLogPath(project);
-  const knownIds = existing ? new Set(existing.map((e) => e.id)) : getKnownIds(project);
-  if (knownIds.has(envelope.id)) return false;
-  ensureProjectDir(project);
-  appendFileSync(logPath, JSON.stringify(envelope) + '\n', 'utf8');
-  noteAppended(project, envelope.id);
-  return true;
+  const release = acquireLogLock(project);
+  try {
+    const logPath = getProjectLogPath(project);
+    const knownIds = existing ? new Set(existing.map((e) => e.id)) : getKnownIds(project);
+    if (knownIds.has(envelope.id)) return false;
+    ensureProjectDir(project);
+    appendFileSync(logPath, JSON.stringify(envelope) + '\n', 'utf8');
+    noteAppended(project, envelope.id);
+    return true;
+  } finally {
+    release();
+  }
 }
 
 export function loadLog(project: string): Envelope[] {
@@ -509,47 +597,80 @@ export interface CompactResult {
  *
  * The rewrite is atomic: a temp file is written and then renamed over the
  * log, so a crash mid-compact never leaves a partially-written log in place.
- * Meant to be run by the daemon on startup and roughly every 24h — this
- * module does not schedule it itself.
+ * The whole read→write→rename runs under the same cross-process lock
+ * `appendEnvelope` takes, and — belt and braces, in case that lock was
+ * contended past its wait and skipped (see `acquireLogLock`) — the log is
+ * re-read right before the rename so any envelope appended after the initial
+ * snapshot is folded in rather than lost. Meant to be run by the daemon on
+ * startup and roughly every 24h — this module does not schedule it itself.
+ *
+ * `testHooks.afterSnapshot` is test-only: an injection point that runs right
+ * after the initial snapshot is loaded (and before the tmp file is written),
+ * so a test can simulate a write landing in that window without needing a
+ * real second process.
  */
-export function compactLog(project: string, now = new Date()): CompactResult {
-  const all = loadLog(project);
-  if (all.length === 0) return { kept: 0, removed: 0 };
+export function compactLog(
+  project: string,
+  now = new Date(),
+  testHooks?: { afterSnapshot?: () => void },
+): CompactResult {
+  const release = acquireLogLock(project);
+  try {
+    const all = loadLog(project);
+    if (all.length === 0) return { kept: 0, removed: 0 };
 
-  const activeClaimIds = new Set(materializeActiveClaims(all, now).map((c) => c.id));
+    testHooks?.afterSnapshot?.();
 
-  const recentTypeIds = new Set<string>();
-  for (const type of COMPACT_KEEP_RECENT_TYPES) {
-    const ofType = all.filter((e) => e.type === type);
-    for (const e of ofType.slice(-COMPACT_KEEP_RECENT_COUNT)) {
-      recentTypeIds.add(e.id);
+    const activeClaimIds = new Set(materializeActiveClaims(all, now).map((c) => c.id));
+
+    const recentTypeIds = new Set<string>();
+    for (const type of COMPACT_KEEP_RECENT_TYPES) {
+      const ofType = all.filter((e) => e.type === type);
+      for (const e of ofType.slice(-COMPACT_KEEP_RECENT_COUNT)) {
+        recentTypeIds.add(e.id);
+      }
     }
+
+    const nowMs = now.getTime();
+    const kept = all.filter((e) => {
+      if (activeClaimIds.has(e.id)) return true;
+      if (recentTypeIds.has(e.id)) return true;
+      const ttlMs = new Date(e.ttl).getTime();
+      return nowMs - ttlMs <= COMPACT_TTL_GRACE_MS;
+    });
+
+    if (kept.length === all.length) {
+      return { kept: kept.length, removed: 0 };
+    }
+
+    const logPath = getProjectLogPath(project);
+    ensureProjectDir(project);
+    const tmpPath = path.join(getProjectDir(project), `.log.compact-${process.pid}-${Date.now()}.tmp`);
+    const writeEnvelopes = (envelopes: Envelope[]) =>
+      writeFileSync(
+        tmpPath,
+        envelopes.length ? envelopes.map((e) => JSON.stringify(e)).join('\n') + '\n' : '',
+        'utf8',
+      );
+    writeEnvelopes(kept);
+
+    // Fold in anything appended since `all` was snapshotted (matched by id,
+    // so nothing already in `kept` is duplicated).
+    const snapshotIds = new Set(all.map((e) => e.id));
+    const trailing = loadLog(project).filter((e) => !snapshotIds.has(e.id));
+    const finalEnvelopes = trailing.length > 0 ? [...kept, ...trailing] : kept;
+    if (trailing.length > 0) writeEnvelopes(finalEnvelopes);
+
+    renameSync(tmpPath, logPath);
+
+    // The file just changed size/mtime out from under whatever this process
+    // had cached for it.
+    logIndexByPath.delete(logPath);
+
+    return { kept: finalEnvelopes.length, removed: all.length - kept.length };
+  } finally {
+    release();
   }
-
-  const nowMs = now.getTime();
-  const kept = all.filter((e) => {
-    if (activeClaimIds.has(e.id)) return true;
-    if (recentTypeIds.has(e.id)) return true;
-    const ttlMs = new Date(e.ttl).getTime();
-    return nowMs - ttlMs <= COMPACT_TTL_GRACE_MS;
-  });
-
-  if (kept.length === all.length) {
-    return { kept: kept.length, removed: 0 };
-  }
-
-  const logPath = getProjectLogPath(project);
-  ensureProjectDir(project);
-  const tmpPath = path.join(getProjectDir(project), `.log.compact-${process.pid}-${Date.now()}.tmp`);
-  const body = kept.map((e) => JSON.stringify(e)).join('\n');
-  writeFileSync(tmpPath, kept.length ? body + '\n' : '', 'utf8');
-  renameSync(tmpPath, logPath);
-
-  // The file just changed size/mtime out from under whatever this process
-  // had cached for it.
-  logIndexByPath.delete(logPath);
-
-  return { kept: kept.length, removed: all.length - kept.length };
 }
 
 function getAnswerSessionsPath(project: string): string {

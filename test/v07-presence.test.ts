@@ -881,7 +881,12 @@ describe('daemon — sendPresenceHeartbeat', () => {
         projects: {
           acme: {
             bus: { kind: 'github', repo: 'acme/api', issue: 1, presence: 9 },
-            repos: [],
+            // Exactly one registered repo, so daemon.ts's advertisedAutoAnswer
+            // (v0.7 fixes review finding #4) can resolve a repo path and
+            // actually advertise autoAnswer: true below — an empty `repos`
+            // has no path an auto-answer could run from, so it would (rightly)
+            // advertise false regardless of `autoAnswer.enabled`.
+            repos: [{ name: 'api', path: home }],
             autoAnswer: { enabled: true, maxPerRequesterPerHour: 5, timeoutSeconds: 120, maxAgeMinutes: 10 },
           },
         },

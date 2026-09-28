@@ -3,9 +3,10 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { Client } from 'discord.js';
 import notifier from 'node-notifier';
-import type { ConfigV2 } from './config.js';
+import type { ConfigV2, ProjectConfig } from './config.js';
 import { loadConfig, resolveAutoAnswer } from './config.js';
-import { runAutoAnswer } from './auto-answer.js';
+import { runAutoAnswer, resolveAutoAnswerRepoPath } from './auto-answer.js';
+import { isReadOnlyAgentSupported } from './agent-cli.js';
 import type { Envelope } from './envelope.js';
 import type { Transport } from './transports/types.js';
 import {
@@ -20,7 +21,7 @@ import {
   compactLog,
 } from './store.js';
 import { rememberIdentity } from './hook.js';
-import { getConfigDir, getProjectDir } from './paths.js';
+import { getConfigDir, getConfigPath, getProjectDir } from './paths.js';
 import { createTransport } from './transports/index.js';
 import { isDiscordBus, type GitHubBusConfig } from './transports/types.js';
 import { GitHubTransport } from './transports/github.js';
@@ -191,7 +192,7 @@ export function ingestEnvelope(
   return { notified: false };
 }
 
-function collectGitHubBindings(config: ConfigV2): GitHubBinding[] {
+export function collectGitHubBindings(config: ConfigV2): GitHubBinding[] {
   const bindings: GitHubBinding[] = [];
 
   for (const [project, projectConfig] of Object.entries(config.projects ?? {})) {
@@ -203,6 +204,78 @@ function collectGitHubBindings(config: ConfigV2): GitHubBinding[] {
   }
 
   return bindings;
+}
+
+export interface GitHubBindingDiff {
+  /** Bindings present in `next` but not in `previous` — start polling these. */
+  added: GitHubBinding[];
+  /** Project names present in `previous` but not in `next` — stop polling these. */
+  removed: string[];
+}
+
+/**
+ * Pure diff between two `collectGitHubBindings` snapshots, keyed by project
+ * name — used by the config hot-reload (below) to know which poll/presence
+ * timers to start or stop without tearing everything down and rebuilding it
+ * on every reload. A project whose bus *changed* (different repo/issue) is
+ * reported as both removed and added, which is exactly right: the old timer
+ * closes over the old binding and must stop, and a fresh one closing over
+ * the new binding must start.
+ */
+export function diffGitHubBindings(previous: GitHubBinding[], next: GitHubBinding[]): GitHubBindingDiff {
+  const sameBinding = (a: GitHubBinding, b: GitHubBinding) =>
+    a.bus.repo === b.bus.repo && a.bus.issue === b.bus.issue && a.bus.presence === b.bus.presence;
+
+  const previousByProject = new Map(previous.map((b) => [b.project, b]));
+  const nextByProject = new Map(next.map((b) => [b.project, b]));
+
+  const added: GitHubBinding[] = [];
+  for (const [project, binding] of nextByProject) {
+    const prior = previousByProject.get(project);
+    if (!prior || !sameBinding(prior, binding)) added.push(binding);
+  }
+
+  const removed: string[] = [];
+  for (const [project, binding] of previousByProject) {
+    const current = nextByProject.get(project);
+    if (!current || !sameBinding(binding, current)) removed.push(project);
+  }
+
+  return { added, removed };
+}
+
+/**
+ * Whether this dev's daemon would actually attempt to auto-answer for
+ * `project` — used only to decide what `autoAnswer` flag to advertise in the
+ * presence heartbeat. `resolveAutoAnswer(...).enabled` alone overstates
+ * this: it's still `false` in practice when the configured agent has no
+ * read-only launcher (`isReadOnlyAgentSupported`), or when the repo path an
+ * answer would run from can't be resolved — in which case `bus_ask`'s
+ * fail-fast (spec §2.3) would keep treating this dev as able to answer while
+ * every attempt actually fails.
+ *
+ * TODO(integration): replace with `canAutoAnswer` from auto-answer.ts once
+ * it lands (added in parallel — review finding #4).
+ */
+export function advertisedAutoAnswer(config: ConfigV2, project: string): boolean {
+  const projectConfig: ProjectConfig | undefined = config.projects[project];
+  const autoAnswer = resolveAutoAnswer(projectConfig);
+  if (!autoAnswer.enabled) return false;
+
+  const agent = config.agent ?? config.identity?.agent ?? 'claude-code';
+  if (!isReadOnlyAgentSupported(agent)) return false;
+
+  const repoPath = resolveAutoAnswerRepoPath(projectConfig, autoAnswer.repoPath);
+  if (!repoPath) return false;
+
+  // An *explicit* repoPath is trusted at config-write time to be a real
+  // directory; a stale/typo'd one would otherwise keep advertising
+  // "can answer" forever while every attempt fails. A path inferred from the
+  // single registered repo doesn't need this check — it's what setup itself
+  // registered.
+  if (autoAnswer.repoPath && !existsSync(path.resolve(repoPath))) return false;
+
+  return true;
 }
 
 interface WhoamiCacheEntry {
@@ -423,8 +496,6 @@ export async function sendPresenceHeartbeat(
       return;
     }
 
-    const autoAnswer = resolveAutoAnswer(config.projects[binding.project]);
-
     await upsertOwnProfile(
       binding.bus,
       dev,
@@ -433,7 +504,7 @@ export async function sendPresenceHeartbeat(
         areas: config.profile?.areas ?? [],
         repos: deriveProjectRepos(binding.project, config, binding),
         agent: config.agent ?? config.identity?.agent ?? 'claude-code',
-        autoAnswer: autoAnswer.enabled,
+        autoAnswer: advertisedAutoAnswer(config, binding.project),
         lastSeen: new Date().toISOString(),
       },
       { commentIdCache: filePresenceCommentIdCache(binding.project) },
@@ -492,11 +563,16 @@ export async function runDaemon(options: { verbose?: boolean } = {}): Promise<vo
 }
 
 async function runDaemonLocked(verbose: boolean): Promise<void> {
-  const config = loadConfig();
+  // Mutable: reassigned by the config hot-reload below (review finding #4).
+  // `let`, not `const`, is what lets every closure captured over this
+  // variable — poll/presence timer callbacks, the Discord `onEnvelope`
+  // handler — see a reload's new config without needing to be rebuilt
+  // themselves.
+  let config = loadConfig();
 
   const discordBusMap = buildDiscordBusMap(config);
   const discordGroups = collectDiscordBindings(config, discordBusMap);
-  const githubBindings = collectGitHubBindings(config);
+  let githubBindings = collectGitHubBindings(config);
 
   if (discordGroups.length === 0 && githubBindings.length === 0) {
     throw new Error(
@@ -506,12 +582,13 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
 
   mkdirSync(getConfigDir(), { recursive: true });
 
-  const projects = [
-    ...new Set([
-      ...discordGroups.flatMap((g) => g.bindings.map((b) => b.project)),
-      ...githubBindings.map((b) => b.project),
-    ]),
-  ];
+  // All projects the daemon has ever bound to in this run (for the pid file
+  // and shutdown cleanup) — only grows, even across a reload, since a
+  // project dropped from config still had a pid file written for it.
+  const projects = new Set<string>([
+    ...discordGroups.flatMap((g) => g.bindings.map((b) => b.project)),
+    ...githubBindings.map((b) => b.project),
+  ]);
 
   for (const project of projects) {
     writeDaemonPid(project);
@@ -545,15 +622,49 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
     }
   }
 
-  const pollTimers: NodeJS.Timeout[] = [];
-  for (const binding of githubBindings) {
+  // Keyed by project rather than kept as flat arrays, so a reload can stop
+  // exactly the timers for a removed/changed project and start exactly the
+  // ones for an added/changed one, instead of tearing every timer down and
+  // rebuilding the lot on every config write.
+  const pollTimers = new Map<string, NodeJS.Timeout>();
+  const presenceTimers = new Map<string, NodeJS.Timeout>();
+
+  function startPollTimer(binding: GitHubBinding): void {
     const timer = setInterval(() => {
+      // `config` (not `binding`) is read fresh on every tick, from the
+      // enclosing `let` — a reload's new config (autoanswer toggled,
+      // profile changed) is picked up without restarting this timer.
       void pollGitHubBinding(binding, config, verbose).catch((err) => {
         daemonLog(binding.project, `GitHub poll error: ${String(err)}`, verbose);
       });
     }, GITHUB_POLL_MS);
-    pollTimers.push(timer);
+    pollTimers.set(binding.project, timer);
   }
+
+  function startPresenceTimer(binding: GitHubBinding): void {
+    if (binding.bus.presence === undefined) return;
+    void sendPresenceHeartbeat(binding, config, verbose);
+    const timer = setInterval(() => {
+      void sendPresenceHeartbeat(binding, config, verbose);
+    }, PRESENCE_HEARTBEAT_MS);
+    presenceTimers.set(binding.project, timer);
+  }
+
+  function stopTimersFor(project: string): void {
+    const pollTimer = pollTimers.get(project);
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimers.delete(project);
+    }
+    const presenceTimer = presenceTimers.get(project);
+    if (presenceTimer) {
+      clearInterval(presenceTimer);
+      presenceTimers.delete(project);
+    }
+  }
+
+  for (const binding of githubBindings) startPollTimer(binding);
+  for (const binding of githubBindings) startPresenceTimer(binding);
 
   // The log is append-only; without compaction it grows forever and every
   // reader pays for it. Compact at start and once a day.
@@ -570,21 +681,77 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
   compact();
   const compactTimer = setInterval(compact, LOG_COMPACT_MS);
 
-  const presenceTimers: NodeJS.Timeout[] = [];
-  for (const binding of githubBindings) {
-    if (binding.bus.presence === undefined) continue;
-    void sendPresenceHeartbeat(binding, config, verbose);
-    const timer = setInterval(() => {
-      void sendPresenceHeartbeat(binding, config, verbose);
-    }, PRESENCE_HEARTBEAT_MS);
-    presenceTimers.push(timer);
+  // --- config hot-reload (review finding #4) ---------------------------
+  //
+  // Without this, `autoanswer off`, a `profile set`, or joining a new
+  // project never took effect until the daemon was restarted: it read
+  // `~/.ai-comms/config.json` exactly once, at startup. Checked on the same
+  // cadence as the GitHub poll (~15s, spec-adjacent — there's no dedicated
+  // cadence for this in the spec) by comparing the config file's mtime, so
+  // an untouched config costs nothing beyond a `stat`.
+  let configMtimeMs = statMtimeMsOrNull(getConfigPath());
+
+  function reloadConfigIfChanged(): void {
+    const mtimeMs = statMtimeMsOrNull(getConfigPath());
+    if (mtimeMs === null || mtimeMs === configMtimeMs) return;
+    configMtimeMs = mtimeMs;
+
+    let nextConfig: ConfigV2;
+    try {
+      nextConfig = loadConfig();
+    } catch (err) {
+      // Keep the previous config — a transient malformed read (another
+      // process mid-write) must not crash the daemon or drop every project
+      // it was already handling.
+      for (const project of projects) {
+        daemonLog(project, `config reload failed: ${String(err)}`, verbose);
+      }
+      return;
+    }
+
+    const nextGithubBindings = collectGitHubBindings(nextConfig);
+    const { added, removed } = diffGitHubBindings(githubBindings, nextGithubBindings);
+
+    for (const project of removed) {
+      stopTimersFor(project);
+      daemonLog(project, 'config reloaded: bus removed or changed, stopped polling', verbose);
+    }
+
+    for (const binding of added) {
+      projects.add(binding.project);
+      writeDaemonPid(binding.project);
+      void (async () => {
+        try {
+          await backfillGitHubBinding(binding, nextConfig, verbose);
+          daemonLog(binding.project, 'GitHub backfill complete (config reload)', verbose);
+        } catch (err) {
+          daemonLog(binding.project, `GitHub backfill error: ${String(err)}`, verbose);
+        }
+      })();
+      startPollTimer(binding);
+      startPresenceTimer(binding);
+    }
+
+    config = nextConfig;
+    githubBindings = nextGithubBindings;
+
+    // Every project this daemon still handles is "affected" by a reload —
+    // even one whose own binding didn't change picks up e.g. a profile or
+    // autoanswer change on its next poll/heartbeat tick.
+    for (const project of projects) {
+      if (removed.includes(project)) continue;
+      daemonLog(project, 'config reloaded', verbose);
+    }
   }
 
+  const configReloadTimer = setInterval(reloadConfigIfChanged, GITHUB_POLL_MS);
+
   const shutdown = () => {
-    for (const timer of pollTimers) {
+    clearInterval(configReloadTimer);
+    for (const timer of pollTimers.values()) {
       clearInterval(timer);
     }
-    for (const timer of presenceTimers) {
+    for (const timer of presenceTimers.values()) {
       clearInterval(timer);
     }
     clearInterval(compactTimer);
@@ -604,4 +771,12 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
   await new Promise<void>(() => {
     // keep alive
   });
+}
+
+function statMtimeMsOrNull(filePath: string): number | null {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
 }

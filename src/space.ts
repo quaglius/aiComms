@@ -1,6 +1,8 @@
+import { existsSync } from 'node:fs';
 import {
   loadConfig,
   saveConfig,
+  getConfigPath,
   resolveAutoAnswer,
   type ConfigV2,
 } from './config.js';
@@ -55,6 +57,10 @@ const PRESENCE_LABEL = 'ai-comms-presence';
 export interface GitHubApiOptions {
   token?: string;
   fetchFn?: typeof fetch;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** "owner/name" -> "owner--name", the project id used for a space (spec §3.1). */
@@ -153,7 +159,17 @@ async function registerSpaceProject(
   let config: ConfigV2;
   try {
     config = loadConfig();
-  } catch {
+  } catch (err) {
+    // Only start from a fresh config when there is nothing on disk to lose.
+    // Any other `loadConfig` failure — malformed JSON, a schema error, a
+    // token left in the file — used to be caught here too and silently
+    // replaced with a config holding only this space, wiping every other
+    // project the person had registered (review finding #6). Surface the
+    // original error instead so they can fix (or move) the file and re-run.
+    const configPath = getConfigPath();
+    if (existsSync(configPath)) {
+      throw new Error(`${errorMessage(err)} — fix or move ${configPath} and re-run.`);
+    }
     config = { version: 2, agent: detectAgent(), defaultProject: '', projects: {} };
   }
 
@@ -387,26 +403,53 @@ export interface InviteOptions extends GitHubApiOptions {
 }
 
 /**
+ * Whether `project`'s bus repo *is* the team-space repo it names — i.e.
+ * `project` is exactly what `space create`/`join` would have named it
+ * (`projectNameForSpace(bus.repo)`, the sanitized `owner--name` form).
+ *
+ * A per-repo project (`ai-comms setup`) names its project after the repo
+ * itself, so its bus repo *is* the product repo — resolving `--space` to it
+ * would grant push access to product code, not a coordination-only space
+ * (review finding #7).
+ */
+function isSpaceProject(project: string, bus: GitHubBusConfig): boolean {
+  try {
+    return projectNameForSpace(bus.repo) === project;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolves the repo `--space` defaults to when not given: the current
  * project's bus (via `resolveContext`, which works with or without a local
  * `.ai-comms.json` — spec §3.3), falling back to `defaultProject`'s bus
- * directly for a cwd `resolveContext` can't place at all.
+ * directly for a cwd `resolveContext` can't place at all. Only defaults when
+ * that project actually *is* a team space (`isSpaceProject`) — never a
+ * per-repo project, whose bus repo is the product repo.
  */
 export function resolveSpaceRepo(explicit: string | undefined, config: ConfigV2, cwd: string = process.cwd()): string {
   if (explicit) return explicit;
 
   try {
     const ctx = resolveContext(cwd, config);
-    if (isGitHubBus(ctx.bus)) return ctx.bus.repo;
+    if (isGitHubBus(ctx.bus) && isSpaceProject(ctx.project, ctx.bus)) {
+      return ctx.bus.repo;
+    }
   } catch {
     // fall through to defaultProject below
   }
 
   const dp = config.defaultProject;
   const bus = dp ? config.projects[dp]?.bus : undefined;
-  if (bus?.kind === 'github') return bus.repo;
+  if (dp && bus?.kind === 'github' && isSpaceProject(dp, bus)) {
+    return bus.repo;
+  }
 
-  throw new Error('Could not determine --space (no current/default project with a GitHub bus). Pass --space owner/name.');
+  throw new Error(
+    'Could not determine --space: the current/default project is not a team space ' +
+      '(its bus repo would be your product repo, not a space). Pass --space owner/name.',
+  );
 }
 
 /** `PUT /repos/{o}/{r}/collaborators/{login}`, one per login (spec §3.1). */
@@ -474,10 +517,20 @@ export interface StatusOptions extends GitHubApiOptions {
 export async function runStatus(options: StatusOptions = {}): Promise<void> {
   const config = loadConfig();
   const apiOpts: GitHubApiOptions = { token: options.token, fetchFn: options.fetchFn };
-  const login = await getGitHubLogin(apiOpts);
 
   console.log('ai-comms status\n');
-  console.log(`Identity: ${login}`);
+
+  // Identity is only informational here — `status` is exactly the command
+  // someone reaches for when something else is broken, so a GitHub outage or
+  // an expired token must not crash it before it can show anything else
+  // (review finding #2).
+  let login = '';
+  try {
+    login = await getGitHubLogin(apiOpts);
+    console.log(`Identity: ${login}`);
+  } catch (err) {
+    console.log(`Identity: (could not verify identity: ${errorMessage(err)})`);
+  }
 
   let ctx: ReturnType<typeof resolveContext>;
   try {
@@ -503,8 +556,12 @@ export async function runStatus(options: StatusOptions = {}): Promise<void> {
 
   console.log('\nTeam directory:');
   if (isGitHubBus(ctx.bus) && ctx.bus.presence !== undefined) {
-    const profiles = await fetchProfiles(ctx.bus, apiOpts);
-    console.log(renderDirectory(profiles, options.now?.getTime()));
+    try {
+      const profiles = await fetchProfiles(ctx.bus, apiOpts);
+      console.log(renderDirectory(profiles, options.now?.getTime()));
+    } catch (err) {
+      console.log(`(could not read the directory: ${errorMessage(err)})`);
+    }
   } else {
     console.log('(no presence issue)');
   }
