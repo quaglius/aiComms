@@ -1,5 +1,5 @@
 import type { Envelope } from './envelope.js';
-import { createEnvelope, globsOverlap, threadOf, type SendInput } from './envelope.js';
+import { createEnvelope, globsOverlap, isDirectedTo, threadOf, type SendInput } from './envelope.js';
 import { appendEnvelope, loadLog } from './store.js';
 import type { Transport } from './transports/types.js';
 import { ownersForPaths, type CodeownersRule } from './codeowners.js';
@@ -112,15 +112,57 @@ export type AskRoutingOutcome =
   | { kind: 'ok'; recipients: string[]; via?: string }
   | { kind: 'error'; message: string };
 
-function dedupeExcludingSelf(list: string[], self: string): string[] {
-  return [...new Set(list)].filter((login) => login !== self);
+/**
+ * GitHub logins are case-insensitive, but a CODEOWNERS file, an explicit
+ * `to`, or a profile's own `login` can each spell the same account
+ * differently (`@Alice` vs. the collaborator `alice`). Builds a
+ * lowercase-login → canonical-casing map from the two sources that actually
+ * know a teammate's real GitHub login — the collaborators list, then presence
+ * profiles — so a resolved envelope's `to` carries the casing teammates'
+ * tooling (case-sensitive `isDirectedTo`/`acceptReplyFrom` comparisons aside,
+ * belt-and-suspenders) actually expects.
+ */
+function buildLoginCasingMap(team: string[], profiles: MemberProfile[]): Map<string, string> {
+  const casing = new Map<string, string>();
+  for (const login of team) {
+    const key = login.toLowerCase();
+    if (!casing.has(key)) casing.set(key, login);
+  }
+  for (const p of profiles) {
+    const key = p.login.toLowerCase();
+    if (!casing.has(key)) casing.set(key, p.login);
+  }
+  return casing;
+}
+
+function canonicalLogin(login: string, casing: Map<string, string>): string {
+  return casing.get(login.toLowerCase()) ?? login;
+}
+
+/**
+ * Dedupes a list of logins case-insensitively, canonicalizing each one to
+ * the known casing from `casing` (see `buildLoginCasingMap`) first, and
+ * excludes `self` — also case-insensitively, so `to: ['Ana']` still excludes
+ * the asker `ana`.
+ */
+function dedupeExcludingSelf(list: string[], self: string, casing: Map<string, string>): string[] {
+  const selfKey = self.toLowerCase();
+  const seen = new Map<string, string>();
+  for (const raw of list) {
+    const canonical = canonicalLogin(raw, casing);
+    const key = canonical.toLowerCase();
+    if (key === selfKey) continue;
+    if (!seen.has(key)) seen.set(key, canonical);
+  }
+  return [...seen.values()];
 }
 
 export function resolveAskRecipients(input: ResolveAskRecipientsInput): AskRoutingOutcome {
   const { to, paths, role, self, team, profiles, codeownersRules, collaboratorsUnavailable } = input;
+  const casing = buildLoginCasingMap(team, profiles);
 
   if (to !== undefined) {
-    const recipients = dedupeExcludingSelf(to, self);
+    const recipients = dedupeExcludingSelf(to, self, casing);
     if (recipients.length === 0) {
       return {
         kind: 'error',
@@ -134,7 +176,7 @@ export function resolveAskRecipients(input: ResolveAskRecipientsInput): AskRouti
 
   if (paths && paths.length > 0) {
     if (codeownersRules && codeownersRules.length > 0) {
-      const owners = dedupeExcludingSelf(ownersForPaths(codeownersRules, paths), self);
+      const owners = dedupeExcludingSelf(ownersForPaths(codeownersRules, paths), self, casing);
       if (owners.length > 0) {
         return { kind: 'ok', recipients: owners, via: `CODEOWNERS: ${owners.join(', ')}` };
       }
@@ -144,6 +186,7 @@ export function resolveAskRecipients(input: ResolveAskRecipientsInput): AskRouti
     const byAreas = dedupeExcludingSelf(
       profiles.filter((p) => p.areas.length > 0 && globsOverlap(p.areas, paths)).map((p) => p.login),
       self,
+      casing,
     );
     if (byAreas.length > 0) {
       return { kind: 'ok', recipients: byAreas, via: `profile areas: ${byAreas.join(', ')}` };
@@ -151,7 +194,7 @@ export function resolveAskRecipients(input: ResolveAskRecipientsInput): AskRouti
   }
 
   if (role && role.trim()) {
-    const byRole = dedupeExcludingSelf(membersByRole(profiles, role).map((p) => p.login), self);
+    const byRole = dedupeExcludingSelf(membersByRole(profiles, role).map((p) => p.login), self, casing);
     if (byRole.length > 0) {
       return { kind: 'ok', recipients: byRole, via: `role "${role}": ${byRole.join(', ')}` };
     }
@@ -167,7 +210,7 @@ export function resolveAskRecipients(input: ResolveAskRecipientsInput): AskRouti
     };
   }
 
-  const others = dedupeExcludingSelf(team, self);
+  const others = dedupeExcludingSelf(team, self, casing);
   if (others.length === 1) {
     return { kind: 'ok', recipients: others, via: `the only known teammate: ${others[0]}` };
   }
@@ -294,7 +337,7 @@ export function buildBusAskEnvelope(
 export function findReplyToAsk(
   log: Envelope[],
   askId: string,
-  opts: { threadId?: string; sinceTs?: string } = {},
+  opts: { threadId?: string; sinceTs?: string; self?: string } = {},
 ): Envelope | null {
   for (let i = log.length - 1; i >= 0; i--) {
     const env = log[i]!;
@@ -303,11 +346,17 @@ export function findReplyToAsk(
     // SPEC-v0.7 §2.6: also accept a reply that names the thread rather than
     // this specific ask, as long as it was published after this ask went out
     // (sinceTs) — otherwise a stale earlier answer in the same thread would
-    // look like a reply to a brand-new follow-up question.
+    // look like a reply to a brand-new follow-up question. In a
+    // multi-participant thread that isn't enough on its own: someone else's
+    // answer to a *different* participant's message also matches the thread,
+    // so a thread match (unlike a direct `reply_to` match) additionally
+    // requires the envelope to actually be directed to the asker
+    // (case-insensitively — see `isDirectedTo`).
     const matchesThread =
       opts.threadId !== undefined &&
       threadOf(env) === opts.threadId &&
-      (opts.sinceTs === undefined || env.ts > opts.sinceTs);
+      (opts.sinceTs === undefined || env.ts > opts.sinceTs) &&
+      (opts.self === undefined || isDirectedTo(env, opts.self));
     if (!matchesDirect && !matchesThread) continue;
     if (env.type === 'answer' || env.type === 'ask' || env.type === 'need') {
       return env;
@@ -406,6 +455,10 @@ export async function waitForBusAskReply(
     threadId?: string;
     /** Only a thread-matched reply published after this timestamp counts (see `findReplyToAsk`). */
     sinceTs?: string;
+    /** The asker's own login — required for a thread-matched (not direct)
+     *  reply to count, so a multi-participant thread can't hand back someone
+     *  else's answer (see `findReplyToAsk`). */
+    self?: string;
   } = {},
 ): Promise<{ kind: 'reply'; envelope: Envelope } | { kind: 'pending' }> {
   const pollMs = options.pollMs ?? BUS_ASK_POLL_MS;
@@ -413,7 +466,11 @@ export async function waitForBusAskReply(
   const sleepFn = options.sleepFn ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const nowFn = options.nowFn ?? (() => Date.now());
   const fetchRemote = options.fetchRemote;
-  const threadOpts = { threadId: options.threadId, sinceTs: options.sinceTs };
+  const threadOpts = { threadId: options.threadId, sinceTs: options.sinceTs, self: options.self };
+  // GitHub logins are case-insensitive — see `isDirectedTo`/`findReplyToAsk`.
+  const acceptReplyFromLower = options.acceptReplyFrom
+    ? new Set(options.acceptReplyFrom.map((login) => login.toLowerCase()))
+    : undefined;
 
   const deadline = nowFn() + timeoutMs;
 
@@ -428,7 +485,7 @@ export async function waitForBusAskReply(
         // and auto-answers envelopes it appends itself — an ask directed at
         // us that arrived while we were waiting would then be dropped silently.
         const remoteEnvelopes = (await fetchRemote()).filter(
-          (e) => !options.acceptReplyFrom || options.acceptReplyFrom.includes(e.from.dev),
+          (e) => !acceptReplyFromLower || acceptReplyFromLower.has(e.from.dev.toLowerCase()),
         );
         const remoteReply = findReplyToAsk(remoteEnvelopes, askId, threadOpts);
         if (remoteReply) {

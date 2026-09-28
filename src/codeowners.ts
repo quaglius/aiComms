@@ -44,11 +44,28 @@ export function loadCodeowners(repoRoot: string): CodeownersRule[] | null {
 
     const tokens = line.split(/\s+/);
     const pattern = tokens[0]!;
-    const owners = [...new Set(tokens.slice(1).map(parseOwnerToken).filter((o): o is string => o !== null))];
+    const owners = dedupeLoginsCaseInsensitive(
+      tokens.slice(1).map(parseOwnerToken).filter((o): o is string => o !== null),
+    );
     rules.push({ pattern, owners });
   }
 
   return rules;
+}
+
+/**
+ * Deduplicates logins case-insensitively (GitHub logins are case-insensitive)
+ * while keeping each login's first-seen casing — never lowercasing it, so a
+ * CODEOWNERS entry written as `@Alice` still routes to the login exactly as
+ * that file spelled it.
+ */
+function dedupeLoginsCaseInsensitive(logins: string[]): string[] {
+  const seen = new Map<string, string>();
+  for (const login of logins) {
+    const key = login.toLowerCase();
+    if (!seen.has(key)) seen.set(key, login);
+  }
+  return [...seen.values()];
 }
 
 function stripLeadingSlash(p: string): string {
@@ -127,7 +144,7 @@ function ruleMatchesQuery(pattern: string, query: string): boolean {
  * given paths are unioned into a deduped list of logins (no `@`).
  */
 export function ownersForPaths(rules: CodeownersRule[], paths: string[]): string[] {
-  const owners = new Set<string>();
+  const owners: string[] = [];
 
   for (const query of paths) {
     let lastMatch: CodeownersRule | null = null;
@@ -137,9 +154,12 @@ export function ownersForPaths(rules: CodeownersRule[], paths: string[]): string
       }
     }
     for (const owner of lastMatch?.owners ?? []) {
-      owners.add(owner);
+      owners.push(owner);
     }
   }
 
-  return [...owners];
+  // Two rules can name the same login with different casing (`@Alice` vs
+  // `@alice`); GitHub logins are case-insensitive, so union across paths must
+  // dedupe the same way, not just by exact string.
+  return dedupeLoginsCaseInsensitive(owners);
 }

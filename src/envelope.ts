@@ -161,8 +161,17 @@ export function isHopsBlocked(envelope: Envelope): boolean {
   return envelope.hops >= 3;
 }
 
+/**
+ * GitHub logins are case-insensitive (`@Alice` and `alice` are the same
+ * account), so `to` must be matched the same way — otherwise an envelope
+ * addressed with different casing than the reader's own login silently
+ * looks undirected. See SPEC-v0.7 §1.1/§2.2 and the CODEOWNERS casing fix in
+ * src/codeowners.ts / src/bus-ask.ts.
+ */
 export function isDirectedTo(envelope: Envelope, dev: string): boolean {
-  return envelope.to.includes('*') || envelope.to.includes(dev);
+  if (envelope.to.includes('*')) return true;
+  const needle = dev.toLowerCase();
+  return envelope.to.some((t) => t.toLowerCase() === needle);
 }
 
 function formatRefsLine(refs: Refs): string {

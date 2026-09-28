@@ -800,14 +800,17 @@ describe('bus_send — human_approved provenance (SPEC-v0.7 §2.5)', () => {
     assert.match(text, /^Published:/);
   });
 
-  it('publishes answered_by "agent" for an answer with no human_approved', async () => {
+  // SPEC-v0.7 §1.1: absent `answered_by` means the same as 'agent' — a
+  // v0.6-compatible `bus_send` must not assert it explicitly (that would
+  // needlessly bump every plain answer to `v: 2`).
+  it('publishes no answered_by (absent, not "agent") for an answer with no human_approved', async () => {
     const { answeredBy } = await publishAnswer(undefined);
-    assert.equal(answeredBy, 'agent');
+    assert.equal(answeredBy, undefined);
   });
 
-  it('publishes answered_by "agent" when human_approved is explicitly false', async () => {
+  it('publishes no answered_by when human_approved is explicitly false', async () => {
     const { answeredBy } = await publishAnswer(false);
-    assert.equal(answeredBy, 'agent');
+    assert.equal(answeredBy, undefined);
   });
 });
 

@@ -56,6 +56,13 @@ import { fetchProfiles, renderDirectory, type MemberProfile } from './presence.j
 
 import { SECURITY_PREAMBLE } from './preamble.js';
 import { rememberIdentity } from './hook.js';
+// TODO(integration): src/hook.ts is being edited in parallel to export
+// `markNotified(project, ids)` (so an answer we already show inline here
+// isn't re-announced by the SessionStart/UserPromptSubmit hook). It may not
+// exist yet on this branch, so we reach it through the namespace import and
+// call it defensively (see the `bus_ask` handler below) rather than a named
+// import, which would fail to build until that export lands.
+import * as hookModule from './hook.js';
 
 export { SECURITY_PREAMBLE };
 
@@ -114,10 +121,17 @@ function allowedProfileAuthor(teamResolution: TeamResolution): ((login: string) 
 // hitting it on every tool call.
 
 const PROFILE_CACHE_TTL_MS = 60_000;
+/** A failed presence read is cached for much less time than a successful one
+ *  — long enough that a burst of tool calls during a rate limit or a 5xx
+ *  blip doesn't hammer GitHub again and again, short enough that a transient
+ *  outage clears itself up within a tool call or two. */
+const PROFILE_FAILURE_CACHE_TTL_MS = 30_000;
 
 interface ProfileCacheEntry {
   profiles: MemberProfile[];
   expiresAt: number;
+  /** Set only when the cached entry is the result of a failed read; `profiles` is `[]` in that case. */
+  unavailableReason?: string;
 }
 
 const profileCache = new Map<string, ProfileCacheEntry>();
@@ -126,21 +140,45 @@ export function clearProfileCacheForTests(): void {
   profileCache.clear();
 }
 
-/** `[]` (no network call) when the bus has no presence issue configured —
- *  everything that depends on presence degrades to v0.6 behavior. */
+export interface CachedProfilesResult {
+  profiles: MemberProfile[];
+  /** SPEC-v0.7 §1.3: set when the presence read itself failed (a 5xx, a rate
+   *  limit, or a deleted presence issue returning 404) rather than the bus
+   *  legitimately having no presence issue or no profiles yet. Everything
+   *  that depends on presence still degrades to v0.6 behavior in either
+   *  case — this is surfaced only so `bus_team` can say why the directory
+   *  looks empty instead of silently showing "(no profiles yet)". */
+  unavailableReason?: string;
+}
+
+/** `{ profiles: [] }` (no network call) when the bus has no presence issue
+ *  configured — everything that depends on presence degrades to v0.6
+ *  behavior. Never throws: a failed presence read (5xx, rate limit, a
+ *  deleted presence issue) must not abort the caller — `bus_ask`/`bus_team`
+ *  degrade to `profiles: []` (v0.6 behavior) instead, with the failure
+ *  reason available via `unavailableReason` and cached briefly so repeated
+ *  calls don't retry a known-bad read on every tool call. */
 async function getCachedProfiles(
   bus: BusConfig,
   opts: { isAllowedAuthor?: (login: string) => boolean; now?: number } = {},
-): Promise<MemberProfile[]> {
-  if (!isGitHubBus(bus) || bus.presence === undefined) return [];
+): Promise<CachedProfilesResult> {
+  if (!isGitHubBus(bus) || bus.presence === undefined) return { profiles: [] };
   const now = opts.now ?? Date.now();
   const key = `${bus.repo}#${bus.presence}`;
   const cached = profileCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.profiles;
+  if (cached && cached.expiresAt > now) {
+    return { profiles: cached.profiles, unavailableReason: cached.unavailableReason };
+  }
 
-  const profiles = await fetchProfiles(bus, { isAllowedAuthor: opts.isAllowedAuthor });
-  profileCache.set(key, { profiles, expiresAt: now + PROFILE_CACHE_TTL_MS });
-  return profiles;
+  try {
+    const profiles = await fetchProfiles(bus, { isAllowedAuthor: opts.isAllowedAuthor });
+    profileCache.set(key, { profiles, expiresAt: now + PROFILE_CACHE_TTL_MS });
+    return { profiles };
+  } catch (err) {
+    const unavailableReason = err instanceof Error ? err.message : String(err);
+    profileCache.set(key, { profiles: [], expiresAt: now + PROFILE_FAILURE_CACHE_TTL_MS, unavailableReason });
+    return { profiles: [], unavailableReason };
+  }
 }
 
 // --- CODEOWNERS for `bus_ask({ paths })` (SPEC-v0.7 §2.2) ----------------
@@ -324,12 +362,15 @@ export function createMcpServer(directory?: string): McpServer {
       });
 
       const { project: _project, human_approved, ...sendFields } = args;
-      // SPEC-v0.7 §2.5: only `answer` carries provenance, and only when the
-      // caller actually said a human approved it — everything else (a live
-      // session sending an answer with no explicit approval, or the
-      // auto-answerer) is `'agent'`.
+      // SPEC-v0.7 §1.1/§2.5: `answered_by` is set only when the caller
+      // actually said a human approved this exact answer — absent means the
+      // same as `'agent'` (nobody validated it), so we must not assert
+      // `'agent'` explicitly here (that would needlessly bump every answer
+      // to `v: 2` and break round-tripping with a v0.6 reader). The
+      // auto-answerer (src/auto-answer.ts) sets `answered_by: 'agent'`
+      // itself when it wants to say so explicitly.
       const answeredBy: AnsweredBy | undefined =
-        sendFields.type === 'answer' ? (human_approved ? 'human' : 'agent') : undefined;
+        sendFields.type === 'answer' && human_approved ? 'human' : undefined;
       const input = SendInputSchema.parse({
         ...sendFields,
         ...(answeredBy !== undefined ? { answered_by: answeredBy } : {}),
@@ -545,7 +586,19 @@ export function createMcpServer(directory?: string): McpServer {
         return { content: [{ type: 'text' as const, text: `You: ${identity.dev}\n\n${body}` }] };
       }
 
-      const profiles = await getCachedProfiles(ctx.bus, { isAllowedAuthor: allowedProfileAuthor(teamResolution) });
+      const { profiles, unavailableReason } = await getCachedProfiles(ctx.bus, {
+        isAllowedAuthor: allowedProfileAuthor(teamResolution),
+      });
+      if (unavailableReason) {
+        // SPEC-v0.7 §1.3: a failed presence read degrades to v0.6 behavior —
+        // still list the plain collaborators, same as the no-presence-issue
+        // branch above, but say why role/areas/online status is missing.
+        const others = teamResolution.team.filter((m) => m !== identity.dev);
+        const body =
+          `(directory unavailable: ${unavailableReason})\n\n` +
+          (others.length > 0 ? `Known collaborators: ${others.join(', ')}.` : '(no collaborators known)');
+        return { content: [{ type: 'text' as const, text: `You: ${identity.dev}\n\n${body}` }] };
+      }
       return {
         content: [{ type: 'text' as const, text: `You: ${identity.dev}\n\n${renderDirectory(profiles)}` }],
       };
@@ -598,7 +651,11 @@ export function createMcpServer(directory?: string): McpServer {
         };
       }
 
-      const profiles = await getCachedProfiles(ctx.bus, { isAllowedAuthor: allowedProfileAuthor(teamResolution) });
+      // SPEC-v0.7 §1.3: `profiles` is `[]` both when there's no presence
+      // issue configured and when the presence read itself failed — either
+      // way, routing/fail-fast below degrade to v0.6 behavior (wait, as if
+      // there were no directory) rather than aborting the ask.
+      const { profiles } = await getCachedProfiles(ctx.bus, { isAllowedAuthor: allowedProfileAuthor(teamResolution) });
       const codeownersRules = args.paths?.length ? resolveCodeownersRules(ctx) : null;
 
       const outcome = resolveAskRecipients({
@@ -692,6 +749,9 @@ export function createMcpServer(directory?: string): McpServer {
         acceptReplyFrom: recipients,
         threadId: threadOf(envelope),
         sinceTs: envelope.ts,
+        // SPEC-v0.7 finding #3: required so a thread match also has to be
+        // directed to *us*, not just anyone in a multi-participant thread.
+        self: identity.dev,
       });
 
       if (result.kind === 'pending') {
@@ -702,6 +762,18 @@ export function createMcpServer(directory?: string): McpServer {
         return {
           content: [{ type: 'text' as const, text: withSecurityPreamble(body, true) }],
         };
+      }
+
+      // SPEC-v0.7 §2.7: the reply is already shown inline below, so tell the
+      // hook not to re-announce it at the recipient's next prompt. Best
+      // effort only — see the TODO(integration) note on the hookModule
+      // import above.
+      try {
+        (hookModule as { markNotified?: (project: string, ids: string[]) => void }).markNotified?.(ctx.project, [
+          result.envelope.id,
+        ]);
+      } catch {
+        // Never let a notification-bookkeeping failure hide the answer we already have.
       }
 
       const replyText = formatBusAskReply(result.envelope);
@@ -740,7 +812,7 @@ export async function buildStartupDirectory(now: number = Date.now()): Promise<s
       if (!isGitHubBus(ctx.bus) || ctx.bus.presence === undefined) return undefined;
 
       const teamResolution = await resolveTeam(ctx);
-      const profiles = await getCachedProfiles(ctx.bus, {
+      const { profiles } = await getCachedProfiles(ctx.bus, {
         isAllowedAuthor: allowedProfileAuthor(teamResolution),
         now,
       });
