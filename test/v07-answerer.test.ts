@@ -6,6 +6,7 @@ import { afterEach, describe, it } from 'node:test';
 
 import type { ConfigV2 } from '../src/config.js';
 import {
+  answererEnv,
   buildReadOnlyAgentSpec,
   parseAgentOutput,
 } from '../src/agent-cli.js';

@@ -173,6 +173,25 @@ export function buildReadOnlyAgentSpec(
   }
 }
 
+/**
+ * The environment the answerer runs with: ours, minus anything that ties a
+ * Claude Code process to a session.
+ *
+ * A daemon started from a Claude Code terminal inherits that session's
+ * `CLAUDE_CODE_*` variables, and `claude -p` then reuses its session id: the
+ * answerer's `--resume` would continue the *user's* interactive session and
+ * could quote it back onto the bus. A fresh answerer must start from nothing
+ * but the repo.
+ */
+export function answererEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_PID') continue;
+    env[key] = value;
+  }
+  return env;
+}
+
 export interface RunHeadlessAgentOptions {
   timeoutMs: number;
   spawnFn?: typeof spawn;
@@ -192,7 +211,7 @@ export function runHeadlessAgent(
       cwd: spec.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
-      env: { ...process.env },
+      env: answererEnv(),
     });
 
     child.stdin?.on('error', () => {
