@@ -3,6 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { ConfigError, type ConfigV2, loadConfig } from './config.js';
 import type { Envelope } from './envelope.js';
+import { getGitRemote } from './git-remote.js';
 import { REPO_COMMS_FILENAME } from './paths.js';
 import type { BusConfig } from './transports/types.js';
 
@@ -11,6 +12,7 @@ const GitHubBusSchema = z
     kind: z.literal('github'),
     repo: z.string().min(1),
     issue: z.number().int().positive(),
+    presence: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -157,6 +159,67 @@ function resolveRepoFromUserConfig(
   return null;
 }
 
+/**
+ * Fills in `bus.presence` from the user config when a committed
+ * `.ai-comms.json` still lacks it and the same repo/issue is registered in
+ * `~/.ai-comms/config.json` for this project (see `ai-comms setup`, which
+ * stores presence there rather than rewriting a committed file — spec §2.1).
+ */
+function withPresenceFromUserConfig(cfg: ConfigV2, project: string, bus: BusConfig): BusConfig {
+  if (bus.kind !== 'github' || bus.presence !== undefined) return bus;
+  const userBus = cfg.projects?.[project]?.bus;
+  if (
+    userBus &&
+    userBus.kind === 'github' &&
+    userBus.repo === bus.repo &&
+    userBus.issue === bus.issue &&
+    userBus.presence !== undefined
+  ) {
+    return { ...bus, presence: userBus.presence };
+  }
+  return bus;
+}
+
+/**
+ * §3.3 fallback: with the MCP/CLI registered at the user level, ai-comms can
+ * run in a repo with no `.ai-comms.json` at all. If `project` (the override,
+ * or `defaultProject`) has a bus configured in the user config but no
+ * registered repo path matches `cwd`, use that project anyway — the repo
+ * name comes from `origin`, or the cwd's basename when there is no git repo.
+ */
+function resolveDefaultProjectFallback(
+  cwd: string,
+  cfg: ConfigV2,
+  project: string,
+): ResolvedContext | null {
+  const projectConfig = cfg.projects?.[project];
+  if (!projectConfig) return null;
+
+  let bus: BusConfig | null = null;
+  if (projectConfig.bus) {
+    bus = projectConfig.bus;
+  } else if (projectConfig.discord) {
+    bus = { kind: 'discord', channelId: projectConfig.discord.channelId };
+  }
+  if (!bus) return null;
+
+  let repo: string;
+  try {
+    repo = getGitRemote(cwd).repo;
+  } catch {
+    repo = path.basename(path.resolve(cwd));
+  }
+
+  return buildUserConfigContext(
+    cfg,
+    project,
+    repo,
+    bus,
+    bus.kind === 'github' ? bus.repo : null,
+    null,
+  );
+}
+
 export function resolveContext(
   cwd: string,
   config?: ConfigV2,
@@ -167,7 +230,7 @@ export function resolveContext(
 
   if (repoCommsPath && !options.projectOverride) {
     const repoComms = loadRepoComms(repoCommsPath);
-    const bus = resolveBusFromRepoComms(repoComms);
+    const bus = withPresenceFromUserConfig(cfg, repoComms.project, resolveBusFromRepoComms(repoComms));
     const channelId = bus.kind === 'discord' ? bus.channelId : '';
     return {
       project: repoComms.project,
@@ -201,7 +264,7 @@ export function resolveContext(
           `(project=${repoComms.project}).`,
       );
     }
-    const bus = resolveBusFromRepoComms(repoComms);
+    const bus = withPresenceFromUserConfig(cfg, repoComms.project, resolveBusFromRepoComms(repoComms));
     const channelId = bus.kind === 'discord' ? bus.channelId : '';
     return {
       project: repoComms.project,
@@ -228,6 +291,11 @@ export function resolveContext(
       fromUser.githubRepo,
       null,
     );
+  }
+
+  if (!repoCommsPath) {
+    const fallback = resolveDefaultProjectFallback(cwd, cfg, project);
+    if (fallback) return fallback;
   }
 
   throw new ContextError(contextResolutionError());

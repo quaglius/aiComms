@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { Client } from 'discord.js';
 import notifier from 'node-notifier';
 import type { ConfigV2 } from './config.js';
-import { loadConfig } from './config.js';
+import { loadConfig, resolveAutoAnswer } from './config.js';
 import { runAutoAnswer } from './auto-answer.js';
 import type { Envelope } from './envelope.js';
 import type { Transport } from './transports/types.js';
@@ -21,12 +21,19 @@ import {
 import { getConfigDir, getProjectDir } from './paths.js';
 import { createTransport } from './transports/index.js';
 import { isDiscordBus, type GitHubBusConfig } from './transports/types.js';
+import { GitHubTransport } from './transports/github.js';
 import { collectDiscordBindings, runDiscordGateway } from './transports/discord-gateway.js';
 import { loadRepoComms, resolveBusFromRepoComms, resolveContext } from './context.js';
 import { getRepoCollaborators } from './collaborators.js';
+import { getGitRemote } from './git-remote.js';
+import { filePresenceCommentIdCache, upsertOwnProfile } from './presence.js';
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const GITHUB_POLL_MS = 15_000;
+/** How often we refresh our own presence profile (spec §2.1: "cada 5
+ *  minutos por proyecto"). Editing a comment never notifies, so there's no
+ *  cost to doing this more often than someone is likely to check it. */
+const PRESENCE_HEARTBEAT_MS = 5 * 60_000;
 /** whoami() hits `GET /user`; re-checking it every 15s poll is pure cost for
  *  an identity that essentially never changes mid-session. */
 const WHOAMI_CACHE_MS = 10 * 60 * 1000;
@@ -36,7 +43,7 @@ const WHOAMI_CACHE_MS = 10 * 60 * 1000;
  *  success-case cache TTL in collaborators.ts. */
 const COLLABORATORS_UNAVAILABLE_MS = 60 * 60 * 1000;
 
-interface GitHubBinding {
+export interface GitHubBinding {
   project: string;
   bus: GitHubBusConfig;
   repoPath: string;
@@ -366,6 +373,69 @@ async function backfillGitHubBinding(
   }
 }
 
+/**
+ * `owner/repo` for every repo registered under this project, derived from
+ * each local path's git `origin` — not the local folder name, which is
+ * meaningless off this machine. Falls back to the bus repo alone when none
+ * of the registered paths are derivable (e.g. deleted/moved locally).
+ */
+export function deriveProjectRepos(project: string, config: ConfigV2, binding: GitHubBinding): string[] {
+  const repos = config.projects[project]?.repos ?? [];
+  const derived: string[] = [];
+  for (const entry of repos) {
+    try {
+      derived.push(getGitRemote(entry.path).fullName);
+    } catch {
+      // Not a git repo (any more), or no "origin" — not derivable.
+    }
+  }
+  return derived.length > 0 ? [...new Set(derived)] : [binding.bus.repo];
+}
+
+/**
+ * Publishes our own presence profile for a binding whose bus has a presence
+ * issue configured (§2.1). Best-effort: a failure here must never take down
+ * the daemon or block polling — it's just logged.
+ */
+export async function sendPresenceHeartbeat(
+  binding: GitHubBinding,
+  config: ConfigV2,
+  verbose: boolean,
+): Promise<void> {
+  if (binding.bus.presence === undefined) return;
+
+  try {
+    // A plain transport, not `githubTransportForBinding` — the heartbeat only
+    // needs `whoami()`, and building the full transport also fetches the
+    // collaborator allowlist, which is wasted work here.
+    const transport = new GitHubTransport({ repo: binding.bus.repo, issue: binding.bus.issue });
+    const dev = await resolveDev(binding, transport, config, verbose);
+    if (!dev) {
+      daemonLog(binding.project, 'presence heartbeat skipped: identity unknown', verbose);
+      return;
+    }
+
+    const autoAnswer = resolveAutoAnswer(config.projects[binding.project]);
+
+    await upsertOwnProfile(
+      binding.bus,
+      dev,
+      {
+        role: config.profile?.role,
+        areas: config.profile?.areas ?? [],
+        repos: deriveProjectRepos(binding.project, config, binding),
+        agent: config.agent ?? config.identity?.agent ?? 'claude-code',
+        autoAnswer: autoAnswer.enabled,
+        lastSeen: new Date().toISOString(),
+      },
+      { commentIdCache: filePresenceCommentIdCache(binding.project) },
+    );
+    daemonLog(binding.project, `presence heartbeat published for ${dev}`, verbose);
+  } catch (err) {
+    daemonLog(binding.project, `presence heartbeat failed: ${String(err)}`, verbose);
+  }
+}
+
 function buildDiscordBusMap(config: ConfigV2): Map<string, { kind: 'discord'; channelId: string }> {
   const map = new Map<string, { kind: 'discord'; channelId: string }>();
 
@@ -477,8 +547,21 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
     pollTimers.push(timer);
   }
 
+  const presenceTimers: NodeJS.Timeout[] = [];
+  for (const binding of githubBindings) {
+    if (binding.bus.presence === undefined) continue;
+    void sendPresenceHeartbeat(binding, config, verbose);
+    const timer = setInterval(() => {
+      void sendPresenceHeartbeat(binding, config, verbose);
+    }, PRESENCE_HEARTBEAT_MS);
+    presenceTimers.push(timer);
+  }
+
   const shutdown = () => {
     for (const timer of pollTimers) {
+      clearInterval(timer);
+    }
+    for (const timer of presenceTimers) {
       clearInterval(timer);
     }
     for (const project of projects) {

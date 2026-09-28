@@ -19,6 +19,12 @@ const BUS_BODY =
   'Coordination bus for AI agents on this project. Each comment carries an ai-comms envelope. ' +
   'Do not close this issue — it is the team bus.';
 
+const PRESENCE_LABEL = 'ai-comms-presence';
+const PRESENCE_TITLE = 'ai-comms presence';
+const PRESENCE_BODY =
+  'Presence & directory for ai-comms. Each member keeps exactly one comment here with their ' +
+  'profile — the daemon edits it in place every few minutes. Do not comment here by hand.';
+
 export function detectAgent(): string {
   if (process.env.AI_COMMS_AGENT?.trim()) return process.env.AI_COMMS_AGENT.trim();
   if (process.env.CURSOR_TRACE_ID || process.env.CURSOR_SESSION) return 'cursor';
@@ -39,16 +45,17 @@ export function detectAgent(): string {
   return 'claude-code';
 }
 
-export async function findBusIssue(
+async function findLabeledIssue(
   ownerRepo: string,
+  label: string,
   options: { token?: string; fetchFn?: typeof fetch } = {},
 ): Promise<number | null> {
   const [owner, repo] = ownerRepo.split('/');
-  const url = `/repos/${owner}/${repo}/issues?labels=${BUS_LABEL}&state=open&per_page=10`;
+  const url = `/repos/${owner}/${repo}/issues?labels=${label}&state=open&per_page=10`;
   const response = await githubFetch(url, { method: 'GET' }, options);
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to search bus issue (${response.status}): ${text.slice(0, 200)}`);
+    throw new Error(`Failed to search issue labeled "${label}" (${response.status}): ${text.slice(0, 200)}`);
   }
 
   const issues = (await response.json()) as Array<{ number: number; pull_request?: unknown }>;
@@ -56,8 +63,9 @@ export async function findBusIssue(
   return issue?.number ?? null;
 }
 
-export async function createBusIssue(
+async function createLabeledIssue(
   ownerRepo: string,
+  params: { title: string; body: string; label: string },
   options: { token?: string; fetchFn?: typeof fetch } = {},
 ): Promise<number> {
   const [owner, repo] = ownerRepo.split('/');
@@ -66,9 +74,9 @@ export async function createBusIssue(
     {
       method: 'POST',
       body: JSON.stringify({
-        title: BUS_TITLE,
-        body: BUS_BODY,
-        labels: [BUS_LABEL],
+        title: params.title,
+        body: params.body,
+        labels: [params.label],
       }),
     },
     options,
@@ -76,11 +84,66 @@ export async function createBusIssue(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to create bus issue (${response.status}): ${text.slice(0, 200)}`);
+    throw new Error(
+      `Failed to create issue labeled "${params.label}" (${response.status}): ${text.slice(0, 200)}`,
+    );
   }
 
   const data = (await response.json()) as { number: number };
   return data.number;
+}
+
+export async function findBusIssue(
+  ownerRepo: string,
+  options: { token?: string; fetchFn?: typeof fetch } = {},
+): Promise<number | null> {
+  return findLabeledIssue(ownerRepo, BUS_LABEL, options);
+}
+
+export async function createBusIssue(
+  ownerRepo: string,
+  options: { token?: string; fetchFn?: typeof fetch } = {},
+): Promise<number> {
+  return createLabeledIssue(ownerRepo, { title: BUS_TITLE, body: BUS_BODY, label: BUS_LABEL }, options);
+}
+
+export async function findPresenceIssue(
+  ownerRepo: string,
+  options: { token?: string; fetchFn?: typeof fetch } = {},
+): Promise<number | null> {
+  return findLabeledIssue(ownerRepo, PRESENCE_LABEL, options);
+}
+
+export async function createPresenceIssue(
+  ownerRepo: string,
+  options: { token?: string; fetchFn?: typeof fetch } = {},
+): Promise<number> {
+  return createLabeledIssue(
+    ownerRepo,
+    { title: PRESENCE_TITLE, body: PRESENCE_BODY, label: PRESENCE_LABEL },
+    options,
+  );
+}
+
+/**
+ * Finds (or creates) the presence issue for a bus repo and locks it, the
+ * same way the bus issue itself is locked. Unlike the bus issue, this never
+ * prompts — presence is an implementation detail of the directory feature,
+ * not something worth blocking setup on.
+ */
+export async function resolveOrCreatePresenceIssue(
+  ownerRepo: string,
+  options: { token?: string; fetchFn?: typeof fetch } = {},
+): Promise<number> {
+  let issue = await findPresenceIssue(ownerRepo, options);
+  if (!issue) {
+    issue = await createPresenceIssue(ownerRepo, options);
+    console.log(`Created presence issue #${issue}`);
+  } else {
+    console.log(`Found presence issue #${issue}`);
+  }
+  await lockBusIssue(ownerRepo, issue, options);
+  return issue;
 }
 
 /**
@@ -228,12 +291,13 @@ function writeRepoComms(
   repo: string,
   ownerRepo: string,
   issue: number,
+  presence: number,
 ): void {
   const target = path.join(cwd, REPO_COMMS_FILENAME);
   const repoComms = {
     project,
     repo,
-    bus: { kind: 'github', repo: ownerRepo, issue },
+    bus: { kind: 'github', repo: ownerRepo, issue, presence },
   };
   writeFileSync(target, JSON.stringify(repoComms, null, 2) + '\n', 'utf8');
   console.log(`Created ${target}`);
@@ -246,6 +310,7 @@ function ensureUserConfig(
   agent: string,
   issue: number,
   ownerRepo: string,
+  presence?: number,
 ): void {
   const configPath = getConfigPath();
   let config: ConfigV2;
@@ -275,7 +340,7 @@ function ensureUserConfig(
   // different repo of the same project first) would make it a) poll the
   // wrong issue and b) never see it, since it never gets rewritten. Whoever
   // runs setup last for a project wins, and they're told so.
-  const newBus = { kind: 'github' as const, repo: ownerRepo, issue };
+  const newBus = { kind: 'github' as const, repo: ownerRepo, issue, ...(presence !== undefined ? { presence } : {}) };
   let bus = existing.bus;
   if (!bus) {
     bus = newBus;
@@ -285,6 +350,10 @@ function ensureUserConfig(
         `updating it to ${newBus.repo}#${newBus.issue}. Restart the daemon so it picks this up.`,
     );
     bus = newBus;
+  } else if (presence !== undefined && bus.presence !== presence) {
+    // A committed .ai-comms.json without `presence` stores it here instead
+    // of rewriting the committed file (spec §2.1).
+    bus = { ...bus, presence };
   }
 
   config.projects[project] = {
@@ -575,6 +644,7 @@ interface SetupTarget {
   repo: string;
   busFullName: string;
   issue: number;
+  presence: number;
 }
 
 /**
@@ -636,11 +706,19 @@ async function resolveSetupTarget(
         `${repoCommsPath} already exists — reusing project "${existing.project}" and bus ` +
           `${existingBus.repo}#${existingBus.issue}.`,
       );
+
+      // A file committed before presence existed won't have it: find/create
+      // the presence issue without rewriting the file (stored in user config
+      // instead — see ensureUserConfig).
+      const presence =
+        existingBus.presence ?? (await resolveOrCreatePresenceIssue(existingBus.repo));
+
       return {
         project: existing.project,
         repo: existing.repo,
         busFullName: existingBus.repo,
         issue: existingBus.issue,
+        presence,
       };
     }
   }
@@ -677,9 +755,55 @@ async function resolveSetupTarget(
 
   await lockBusIssue(busFullName, issue);
 
-  writeRepoComms(cwd, project, repo, busFullName, issue);
+  const presence = await resolveOrCreatePresenceIssue(busFullName);
 
-  return { project, repo, busFullName, issue };
+  writeRepoComms(cwd, project, repo, busFullName, issue, presence);
+
+  return { project, repo, busFullName, issue, presence };
+}
+
+/**
+ * Asks the two optional profile questions from spec §2.1. Both default to
+ * whatever is already saved (Enter keeps it) and the whole thing is skipped
+ * outright when stdin is not a TTY — a scripted/CI setup run must not hang
+ * waiting on input that will never come.
+ */
+export async function maybeUpdateProfile(
+  options: {
+    isTTY?: boolean;
+    promptFn?: (question: string, defaultValue?: string) => Promise<string>;
+  } = {},
+): Promise<void> {
+  const isTTY = options.isTTY ?? Boolean(process.stdin.isTTY);
+  if (!isTTY) return;
+
+  const promptFn = options.promptFn ?? prompt;
+
+  let config: ConfigV2;
+  try {
+    config = loadConfig();
+  } catch {
+    return;
+  }
+
+  const role = await promptFn(
+    '¿En qué sos referente? (p. ej. arquitectura, backend, infra)',
+    config.profile?.role,
+  );
+  const areasRaw = await promptFn(
+    '¿Qué rutas conocés mejor? (globs, separados por coma)',
+    (config.profile?.areas ?? []).join(', '),
+  );
+  const areas = areasRaw
+    .split(',')
+    .map((a) => a.trim())
+    .filter(Boolean);
+
+  config.profile = {
+    ...(role ? { role } : {}),
+    ...(areas.length ? { areas } : {}),
+  };
+  saveConfig(config);
 }
 
 export async function runSetup(options: SetupOptions = {}): Promise<void> {
@@ -689,9 +813,13 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   getGitHubToken();
 
   const repoCommsPath = path.join(cwd, REPO_COMMS_FILENAME);
-  const { project, repo, busFullName, issue } = await resolveSetupTarget(cwd, repoCommsPath, options);
+  const { project, repo, busFullName, issue, presence } = await resolveSetupTarget(
+    cwd,
+    repoCommsPath,
+    options,
+  );
 
-  ensureUserConfig(cwd, project, repo, agent, issue, busFullName);
+  ensureUserConfig(cwd, project, repo, agent, issue, busFullName, presence);
   writeMcpConfig(cwd);
 
   const block = buildInstructionsBlock({
@@ -703,6 +831,14 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   const written = writeInstructionsToRepo(cwd, block);
   for (const file of written) {
     console.log(`Updated ${file}`);
+  }
+
+  try {
+    await maybeUpdateProfile();
+  } catch (err) {
+    console.warn(
+      `⚠ Skipping profile questions (${err instanceof Error ? err.message : String(err)}).`,
+    );
   }
 
   if (!options.skipDaemonOffer) {

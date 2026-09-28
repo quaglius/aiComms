@@ -50,6 +50,7 @@ import { isDiscordBus, isGitHubBus } from './transports/types.js';
 import { getRepoCollaborators } from './collaborators.js';
 import { runSetup, writeMcpConfig } from './setup.js';
 import { computeAutoAnswerConfig, installClaudeHooks, runHook, uninstallClaudeHooks } from './hook.js';
+import { fetchProfiles, renderDirectory } from './presence.js';
 
 async function runInit(): Promise<void> {
   console.log('ai-comms initial setup (legacy Discord)\n');
@@ -352,6 +353,54 @@ async function runBudget(projectOverride?: string): Promise<void> {
   console.log(formatBudgetSnapshot(snapshot));
 }
 
+function printProfile(config: ReturnType<typeof loadConfig>): void {
+  const role = config.profile?.role ?? '(not set)';
+  const areas = config.profile?.areas?.length ? config.profile.areas.join(', ') : '(not set)';
+  console.log(`role:  ${role}`);
+  console.log(`areas: ${areas}`);
+}
+
+async function runProfileSet(opts: { role?: string; areas?: string }): Promise<void> {
+  const config = loadConfig();
+
+  const role = opts.role !== undefined ? opts.role.trim() : config.profile?.role;
+  const areas =
+    opts.areas !== undefined
+      ? opts.areas
+          .split(',')
+          .map((a) => a.trim())
+          .filter(Boolean)
+      : (config.profile?.areas ?? []);
+
+  config.profile = {
+    ...(role ? { role } : {}),
+    ...(areas.length ? { areas } : {}),
+  };
+  saveConfig(config);
+
+  console.log('Profile updated.');
+  printProfile(config);
+}
+
+async function runProfileShow(): Promise<void> {
+  printProfile(loadConfig());
+}
+
+async function runTeam(projectOverride?: string): Promise<void> {
+  const config = loadConfig();
+  const ctx = resolveContext(process.cwd(), config, { projectOverride });
+
+  if (!isGitHubBus(ctx.bus) || ctx.bus.presence === undefined) {
+    console.log(
+      'No presence directory configured for this project. Run "ai-comms setup" to create one.',
+    );
+    return;
+  }
+
+  const profiles = await fetchProfiles(ctx.bus);
+  console.log(renderDirectory(profiles));
+}
+
 async function runClaims(projectOverride?: string): Promise<void> {
   const config = loadConfig();
   const ctx = resolveContext(process.cwd(), config, { projectOverride });
@@ -595,6 +644,30 @@ program
       return;
     }
     await runAutoAnswerCommand(state, opts);
+  });
+
+const profileCmd = program.command('profile').description('Your ai-comms presence profile');
+profileCmd
+  .command('set')
+  .description('Set your role and/or areas for the team directory')
+  .option('--role <role>', 'what you are the go-to person for (e.g. backend, infra)')
+  .option('--areas <a,b,...>', 'comma-separated globs you know best (e.g. "src/api/**,docs/adr/**")')
+  .action(async (opts: { role?: string; areas?: string }) => {
+    await runProfileSet(opts);
+  });
+profileCmd
+  .command('show')
+  .description('Show your current profile')
+  .action(async () => {
+    await runProfileShow();
+  });
+
+program
+  .command('team')
+  .description('Show the presence/team directory for the current project')
+  .option('--project <p>', 'project')
+  .action(async (opts: { project?: string }) => {
+    await runTeam(opts.project);
   });
 
 program.parseAsync(process.argv).catch((err) => {

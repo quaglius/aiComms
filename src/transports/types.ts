@@ -29,6 +29,8 @@ export interface GitHubBusConfig {
   kind: 'github';
   repo: string;
   issue: number;
+  /** The presence/directory issue (see docs/SPEC-v0.7.md §1.3 / §2.1). */
+  presence?: number;
 }
 
 export interface DiscordBusConfig {

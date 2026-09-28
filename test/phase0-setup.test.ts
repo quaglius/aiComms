@@ -142,18 +142,30 @@ describe('B3 — setup respects an existing valid .ai-comms.json', () => {
       assert.equal(after, committedContent, '.ai-comms.json must not be rewritten');
 
       // Reusing an already-known bus must not re-check visibility or
-      // re-lock — the only network call is the (read-only) collaborators
-      // lookup used for the CLAUDE.md team line.
+      // re-lock — the only network calls are the (read-only) collaborators
+      // lookup used for the CLAUDE.md team line, and — new in v0.7 — finding
+      // (or creating) and locking the presence issue, since this committed
+      // file predates presence and doesn't carry `bus.presence` (spec §2.1:
+      // stored in user config instead, never by rewriting the file).
       assert.ok(calls.length > 0);
       assert.ok(
-        calls.every((c) => c.url.includes('/collaborators')),
-        `expected only collaborators calls, got: ${JSON.stringify(calls)}`,
+        calls.every((c) => c.url.includes('/collaborators') || c.url.includes('/issues')),
+        `expected only collaborators/presence-issue calls, got: ${JSON.stringify(calls)}`,
       );
 
       const userConfig = JSON.parse(
         readFileSync(path.join(home, '.ai-comms', 'config.json'), 'utf8'),
       );
-      assert.deepEqual(userConfig.projects.acme.bus, { kind: 'github', repo: 'acme/api', issue: 42 });
+      // presence: 99 — the mock's generic /issues route doesn't filter by
+      // label, so with no `issues` fixture given it finds none and the
+      // presence lookup falls through to creating one (mock's default
+      // createIssueNumber).
+      assert.deepEqual(userConfig.projects.acme.bus, {
+        kind: 'github',
+        repo: 'acme/api',
+        issue: 42,
+        presence: 99,
+      });
       assert.equal(userConfig.projects.acme.repos[0].name, 'web');
     });
   });
@@ -177,7 +189,11 @@ describe('B3 — setup respects an existing valid .ai-comms.json', () => {
       const written = JSON.parse(readFileSync(path.join(repoDir, '.ai-comms.json'), 'utf8'));
       assert.equal(written.repo, 'web', 'repo must come from origin, not the "web-bruno" folder');
       assert.equal(written.project, 'web', 'default project must also come from origin');
-      assert.deepEqual(written.bus, { kind: 'github', repo: 'acme/web', issue: 7 });
+      // presence: 7 — the mock's generic /issues route returns the same
+      // fixture regardless of the `labels=` filter, so the presence lookup
+      // "finds" the same #7 as the bus issue here. On real GitHub these are
+      // two distinct, differently-labeled issues.
+      assert.deepEqual(written.bus, { kind: 'github', repo: 'acme/web', issue: 7, presence: 7 });
     });
   });
 

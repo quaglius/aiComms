@@ -17,12 +17,20 @@ const GitHubBusSchema = z.object({
   kind: z.literal('github'),
   repo: z.string().min(1),
   issue: z.number().int().positive(),
+  presence: z.number().int().positive().optional(),
 });
 
 const RepoEntrySchema = z.object({
   name: z.string().min(1),
   path: z.string().min(1),
 });
+
+const ProfileSchema = z
+  .object({
+    role: z.string().min(1).optional(),
+    areas: z.array(z.string()).optional(),
+  })
+  .strict();
 
 const AutoAnswerConfigSchema = z
   .object({
@@ -47,11 +55,13 @@ export const ConfigV2Schema = z.object({
   agent: z.string().min(1).optional(),
   defaultProject: z.string().min(1),
   projects: z.record(z.string(), ProjectConfigSchema).default({}),
+  profile: ProfileSchema.optional(),
 });
 
 export type ConfigV2 = z.infer<typeof ConfigV2Schema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type AutoAnswerConfig = z.infer<typeof AutoAnswerConfigSchema>;
+export type Profile = z.infer<typeof ProfileSchema>;
 
 export interface ResolvedAutoAnswer {
   enabled: boolean;
