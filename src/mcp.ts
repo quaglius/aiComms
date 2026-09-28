@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -8,14 +10,16 @@ import { getRepoCollaborators } from './collaborators.js';
 import { createNotifiers } from './notifiers/index.js';
 import { createTransport } from './transports/index.js';
 import { isGitHubBus } from './transports/types.js';
-import type { Transport, TransportIdentity } from './transports/types.js';
+import type { BusConfig, Transport, TransportIdentity } from './transports/types.js';
 import { formatCursor } from './transports/github.js';
 import {
   createEnvelope,
   EnvelopeTooLargeError,
   SendInputShape,
   SendInputSchema,
+  threadOf,
   validateClaimInput,
+  type AnsweredBy,
   type Envelope,
 } from './envelope.js';
 import {
@@ -39,10 +43,16 @@ import {
   clampBusAskTimeout,
   createGitHubAskFetcher,
   formatBusAskReply,
+  formatDisplayMarker,
+  formatFailFastNotice,
   formatPendingBusAsk,
-  resolveBusAskRecipients,
+  resolveAskRecipients,
+  resolveThreadContinuation,
+  shouldFailFast,
   waitForBusAskReply,
 } from './bus-ask.js';
+import { loadCodeowners, type CodeownersRule } from './codeowners.js';
+import { fetchProfiles, renderDirectory, type MemberProfile } from './presence.js';
 
 import { SECURITY_PREAMBLE } from './preamble.js';
 import { rememberIdentity } from './hook.js';
@@ -62,6 +72,8 @@ function withSecurityPreamble(body: string, hasForeign: boolean): string {
 export const MCP_SERVER_INSTRUCTIONS = `This is a coordination bus for a team's AI agents — not a chat channel.
 
 - Before guessing, or asking the human user about something owned by another repo or teammate, use \`bus_ask\` with an explicit \`to\` — never broadcast a question to the whole team.
+- Don't know who owns a topic? Use bus_ask's \`paths\` (routed via CODEOWNERS/profile areas) or \`role\` instead of \`to\`; call \`bus_team\` for the directory.
+- Set \`needs_human: true\` on a question that needs a person's approval or decision, not just a fact — it skips auto-answer and notifies with sound.
 - Check \`bus_claims\` before editing shared files, and publish a \`claim\` (via bus_send) before starting long or risky work on them.
 - Publish a \`contract\` (via bus_send) before changing an interface other teams' agents consume.
 - Check \`bus_inbox\` at the start of a task for pending questions, contracts, or handoffs.
@@ -84,6 +96,77 @@ async function resolveTeam(ctx: ReturnType<typeof resolveContext>): Promise<Team
     }
   }
   return { team: ctx.team, collaboratorsUnavailable: false };
+}
+
+/** Builds the `isAllowedAuthor` filter presence reads should use: same rule
+ *  the daemon applies to envelopes (D4/§2.1) — only trust collaborators when
+ *  the list could actually be fetched; otherwise don't filter at all rather
+ *  than silently hiding every profile. */
+function allowedProfileAuthor(teamResolution: TeamResolution): ((login: string) => boolean) | undefined {
+  return teamResolution.collaboratorsUnavailable ? undefined : (login) => teamResolution.team.includes(login);
+}
+
+// --- Presence directory cache (SPEC-v0.7 §2.2/§2.4) ----------------------
+//
+// bus_ask routing, bus_team, and the startup directory in the server
+// instructions all read the same presence issue. Reading it is a paginated
+// GitHub API call, so cache it in-process for a short while rather than
+// hitting it on every tool call.
+
+const PROFILE_CACHE_TTL_MS = 60_000;
+
+interface ProfileCacheEntry {
+  profiles: MemberProfile[];
+  expiresAt: number;
+}
+
+const profileCache = new Map<string, ProfileCacheEntry>();
+
+export function clearProfileCacheForTests(): void {
+  profileCache.clear();
+}
+
+/** `[]` (no network call) when the bus has no presence issue configured —
+ *  everything that depends on presence degrades to v0.6 behavior. */
+async function getCachedProfiles(
+  bus: BusConfig,
+  opts: { isAllowedAuthor?: (login: string) => boolean; now?: number } = {},
+): Promise<MemberProfile[]> {
+  if (!isGitHubBus(bus) || bus.presence === undefined) return [];
+  const now = opts.now ?? Date.now();
+  const key = `${bus.repo}#${bus.presence}`;
+  const cached = profileCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.profiles;
+
+  const profiles = await fetchProfiles(bus, { isAllowedAuthor: opts.isAllowedAuthor });
+  profileCache.set(key, { profiles, expiresAt: now + PROFILE_CACHE_TTL_MS });
+  return profiles;
+}
+
+// --- CODEOWNERS for `bus_ask({ paths })` (SPEC-v0.7 §2.2) ----------------
+
+/** Walks up from `startDir` looking for a `.git` directory, the same way git
+ *  itself finds the repo root. Used only as a fallback for a context that
+ *  has no committed `.ai-comms.json` (so no `repoCommsPath` to anchor on). */
+function findGitRepoRoot(startDir: string): string | null {
+  let dir = path.resolve(startDir);
+  const root = path.parse(dir).root;
+  for (;;) {
+    if (existsSync(path.join(dir, '.git'))) return dir;
+    if (dir === root) return null;
+    dir = path.dirname(dir);
+  }
+}
+
+/** The repo root to read CODEOWNERS from: the directory holding the current
+ *  project's `.ai-comms.json` when there is one, otherwise the nearest `.git`
+ *  ancestor of the cwd. Returns `null` (no CODEOWNERS lookup) when neither is
+ *  found — routing then falls straight through to the profile/role/teammate
+ *  steps in `resolveAskRecipients`. */
+function resolveCodeownersRules(ctx: ReturnType<typeof resolveContext>): CodeownersRule[] | null {
+  const repoRoot = ctx.repoCommsPath ? path.dirname(ctx.repoCommsPath) : findGitRepoRoot(process.cwd());
+  if (!repoRoot) return null;
+  return loadCodeowners(repoRoot);
 }
 
 // --- Identity cache (D12 / task 5) --------------------------------------
@@ -174,26 +257,65 @@ export function runBusInbox(
   }
 
   const hasForeign = inbox.some((e) => e.from.dev !== dev);
-  const body = staleWarning + formatInboxForDisplay(inbox, log);
+  const body = staleWarning + annotateInboxDisplay(formatInboxForDisplay(inbox, log), inbox);
 
   return { text: withSecurityPreamble(body, hasForeign), hasForeign };
 }
 
-export function createMcpServer(): McpServer {
-  const server = new McpServer(
-    { name: 'ai-comms', version: PACKAGE_VERSION },
-    { instructions: MCP_SERVER_INSTRUCTIONS },
-  );
+/**
+ * SPEC-v0.7 §2.5: adds `formatDisplayMarker`'s marker line (unvalidated
+ * automated answer, or a decision that needs a human) in front of each
+ * envelope's block in `bus_inbox`'s rendered text.
+ *
+ * `store.ts`'s `formatInboxForDisplay` renders one block per envelope
+ * (`JSON.stringify(env, null, 2)`, so no blank line ever appears *inside* a
+ * block) joined by a blank line — splitting on that same separator and
+ * zipping back against `inbox` (the very array it was built from, same
+ * order) lets us add the marker without duplicating its release-note logic
+ * here. If the split doesn't line up 1:1 with `inbox` for any reason, this
+ * returns `text` unchanged rather than risk corrupting the listing.
+ */
+export function annotateInboxDisplay(text: string, inbox: Envelope[]): string {
+  if (inbox.length === 0) return text;
+  const blocks = text.split('\n\n');
+  if (blocks.length !== inbox.length) return text;
+
+  return blocks
+    .map((block, i) => {
+      const marker = formatDisplayMarker(inbox[i]!);
+      return marker ? `${marker}\n${block}` : block;
+    })
+    .join('\n\n');
+}
+
+export function createMcpServer(directory?: string): McpServer {
+  const instructions = directory ? `${MCP_SERVER_INSTRUCTIONS}\n\n${directory}` : MCP_SERVER_INSTRUCTIONS;
+  const server = new McpServer({ name: 'ai-comms', version: PACKAGE_VERSION }, { instructions });
+
+  // `answered_by` itself is left off the exposed schema: it must only ever
+  // come from `human_approved` below, never asserted directly by the caller
+  // (which would let an agent claim human approval without going through
+  // that check — SPEC-v0.7 §2.5).
+  const { answered_by: _answeredByField, ...sendInputShapeWithoutAnsweredBy } = SendInputShape;
 
   server.tool(
     'bus_send',
     'Publish an envelope (claim, release, contract, need, fyi, done, ask or answer) on the ' +
       'team bus. Use it to claim shared files before editing them, publish a contract before ' +
       'changing an interface other agents consume, or send a status update — not for private ' +
-      'conversation with the human user.',
+      "conversation with the human user. For an `answer`, only set `human_approved: true` when " +
+      "the user explicitly approved this exact answer's content; otherwise it publishes and " +
+      'displays as an automated, unvalidated answer.',
     {
-      ...SendInputShape,
+      ...sendInputShapeWithoutAnsweredBy,
       project: z.string().optional(),
+      human_approved: z
+        .boolean()
+        .optional()
+        .describe(
+          'Only meaningful for type=answer. true only when the user explicitly approved this ' +
+            "exact answer's content — never set it just because the answer looks right.",
+        ),
     },
     async (args) => {
       const config = loadConfig();
@@ -201,7 +323,17 @@ export function createMcpServer(): McpServer {
         projectOverride: args.project,
       });
 
-      const input = SendInputSchema.parse(args);
+      const { project: _project, human_approved, ...sendFields } = args;
+      // SPEC-v0.7 §2.5: only `answer` carries provenance, and only when the
+      // caller actually said a human approved it — everything else (a live
+      // session sending an answer with no explicit approval, or the
+      // auto-answerer) is `'agent'`.
+      const answeredBy: AnsweredBy | undefined =
+        sendFields.type === 'answer' ? (human_approved ? 'human' : 'agent') : undefined;
+      const input = SendInputSchema.parse({
+        ...sendFields,
+        ...(answeredBy !== undefined ? { answered_by: answeredBy } : {}),
+      });
       const claimError = validateClaimInput(input);
       if (claimError) {
         return { content: [{ type: 'text' as const, text: `Error: ${claimError}` }] };
@@ -389,15 +521,57 @@ export function createMcpServer(): McpServer {
   );
 
   server.tool(
+    'bus_team',
+    "Show the team directory — each teammate's role, areas, online status and auto-answer — " +
+      'plus who you are. Call this before `bus_ask` with `paths`/`role`, or after a bus_ask ' +
+      'routing error, to see who to address. Falls back to the plain collaborator list when no ' +
+      'presence issue is configured for this project.',
+    { project: z.string().optional() },
+    async (args) => {
+      const config = loadConfig();
+      const ctx = resolveContext(process.cwd(), config, {
+        projectOverride: args.project,
+      });
+      const transport = createTransport(ctx, config);
+      const identity = await getCachedIdentity(ctx, transport);
+      const teamResolution = await resolveTeam(ctx);
+
+      if (!isGitHubBus(ctx.bus) || ctx.bus.presence === undefined) {
+        const others = teamResolution.team.filter((m) => m !== identity.dev);
+        const body =
+          'No presence issue is configured for this project, so role/areas/online status is ' +
+          'not available.\n\n' +
+          (others.length > 0 ? `Known collaborators: ${others.join(', ')}.` : '(no collaborators known)');
+        return { content: [{ type: 'text' as const, text: `You: ${identity.dev}\n\n${body}` }] };
+      }
+
+      const profiles = await getCachedProfiles(ctx.bus, { isAllowedAuthor: allowedProfileAuthor(teamResolution) });
+      return {
+        content: [{ type: 'text' as const, text: `You: ${identity.dev}\n\n${renderDirectory(profiles)}` }],
+      };
+    },
+  );
+
+  server.tool(
     'bus_ask',
-    'Ask a specific teammate\'s agent a question and wait up to timeout_s for the answer — e.g. ' +
+    'Ask a teammate\'s agent a question and wait up to timeout_s for the answer — e.g. ' +
       '"does auth/session.ts already handle refresh tokens?" Use this instead of guessing, or ' +
-      'instead of asking the human user, about something owned by another repo or teammate. ' +
-      'Always set `to` to the person who owns the topic: omitting it only works when exactly ' +
-      'one other teammate is known, and it never broadcasts to the whole team.',
+      'instead of asking the human user, about something owned by another repo or teammate. Set ' +
+      '`to` when you already know who owns the topic; otherwise pass `paths` (routed via ' +
+      "CODEOWNERS, or teammates' declared areas) or `role` and ai-comms resolves it — it never " +
+      'broadcasts to the whole team, and errors with the team directory when it cannot resolve ' +
+      'exactly one recipient. Pass `thread` (the id this tool returned) to continue an earlier ' +
+      "conversation. Set `needs_human: true` when the question needs a person's approval or " +
+      "decision, not just a fact — it skips auto-answer, and if no one's available to answer " +
+      'right away, this returns immediately instead of waiting, with the answer to follow later ' +
+      'via `bus_inbox`.',
     {
       question: z.string().min(1),
       to: z.array(z.string().min(1)).optional(),
+      paths: z.array(z.string().min(1)).optional(),
+      role: z.string().min(1).optional(),
+      thread: z.string().min(1).optional(),
+      needs_human: z.boolean().optional(),
       timeout_s: z.number().int().min(1).max(120).optional(),
       context: z.string().max(4000).optional(),
       project: z.string().optional(),
@@ -411,40 +585,49 @@ export function createMcpServer(): McpServer {
       const identity = await getCachedIdentity(ctx, transport);
       const teamResolution = await resolveTeam(ctx);
 
-      let recipients: string[];
-      if (args.to !== undefined) {
-        if (args.to.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text:
-                  'Error: `to` cannot be empty. Set it to the teammate who owns this topic, or ' +
-                  'omit it to let ai-comms resolve it.',
-              },
-            ],
-          };
-        }
-        recipients = args.to;
-      } else {
-        const outcome = resolveBusAskRecipients(teamResolution.team, identity.dev, {
-          collaboratorsUnavailable: teamResolution.collaboratorsUnavailable,
-        });
-        if (outcome.kind === 'error') {
-          return { content: [{ type: 'text' as const, text: `Error: ${outcome.message}` }] };
-        }
-        recipients = outcome.recipients;
+      if (args.to !== undefined && args.to.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                'Error: `to` cannot be empty. Set it to the teammate who owns this topic, or ' +
+                'omit it to let ai-comms resolve it.',
+            },
+          ],
+        };
       }
+
+      const profiles = await getCachedProfiles(ctx.bus, { isAllowedAuthor: allowedProfileAuthor(teamResolution) });
+      const codeownersRules = args.paths?.length ? resolveCodeownersRules(ctx) : null;
+
+      const outcome = resolveAskRecipients({
+        to: args.to,
+        paths: args.paths,
+        role: args.role,
+        self: identity.dev,
+        team: teamResolution.team,
+        profiles,
+        codeownersRules,
+        collaboratorsUnavailable: teamResolution.collaboratorsUnavailable,
+      });
+      if (outcome.kind === 'error') {
+        return { content: [{ type: 'text' as const, text: `Error: ${outcome.message}` }] };
+      }
+      const recipients = outcome.recipients;
 
       const recipientWarnings = validateRecipients(recipients, teamResolution.team, identity.dev, {
         log: loadLog(ctx.project),
       });
+
+      const threadInfo = resolveThreadContinuation(loadLog(ctx.project), args.thread);
 
       const envelope = buildBusAskEnvelope(
         args.question,
         recipients,
         { dev: identity.dev, agent: ctx.agent, repo: ctx.repo },
         args.context,
+        { thread: threadInfo.thread, reply_to: threadInfo.reply_to, needsHuman: args.needs_human },
       );
 
       let sendResult;
@@ -460,6 +643,25 @@ export function createMcpServer(): McpServer {
         throw err;
       }
       appendEnvelope(envelope, ctx.project);
+
+      const warningsText =
+        recipientWarnings.length > 0
+          ? recipientWarnings.map((w) => `Warning: ${w}`).join('\n') + '\n\n'
+          : '';
+      const viaText = outcome.via ? `Resolved via ${outcome.via}\n\n` : '';
+      const threadLine = `\n\nThread: ${threadOf(envelope)}`;
+
+      // SPEC-v0.7 §2.3: with presence data, don't wait when no recipient can
+      // actually auto-answer right now (offline, auto-answer off) or the
+      // question needs a human — publish and return immediately.
+      if (shouldFailFast(recipients, profiles, args.needs_human)) {
+        const body =
+          `${warningsText}${viaText}` +
+          `${formatFailFastNotice(envelope.id, recipients, profiles, args.needs_human)}${threadLine}`;
+        return {
+          content: [{ type: 'text' as const, text: withSecurityPreamble(body, true) }],
+        };
+      }
 
       // D2: without a daemon, replies that only exist on GitHub are invisible
       // to the local log. Poll the transport directly alongside it, starting
@@ -488,24 +690,22 @@ export function createMcpServer(): McpServer {
         fetchRemote,
         pollMs,
         acceptReplyFrom: recipients,
+        threadId: threadOf(envelope),
+        sinceTs: envelope.ts,
       });
-
-      const warningsText =
-        recipientWarnings.length > 0
-          ? recipientWarnings.map((w) => `Warning: ${w}`).join('\n') + '\n\n'
-          : '';
 
       if (result.kind === 'pending') {
         const projects = Object.keys(config.projects ?? {});
         const daemonRunning = isDaemonRunning(ctx.project) || isAnyDaemonRunning(projects);
-        const body = `${warningsText}${formatPendingBusAsk(envelope.id, { daemonRunning })}`;
+        const body =
+          `${warningsText}${viaText}${formatPendingBusAsk(envelope.id, { daemonRunning })}${threadLine}`;
         return {
           content: [{ type: 'text' as const, text: withSecurityPreamble(body, true) }],
         };
       }
 
       const replyText = formatBusAskReply(result.envelope);
-      const body = `${warningsText}Published ask ${envelope.id}\n\n${replyText}`;
+      const body = `${warningsText}${viaText}Published ask ${envelope.id}\n\n${replyText}${threadLine}`;
       return {
         content: [{ type: 'text' as const, text: withSecurityPreamble(body, true) }],
       };
@@ -515,8 +715,55 @@ export function createMcpServer(): McpServer {
   return server;
 }
 
+// SPEC-v0.7 §2.4: how long `runMcpServer` gives itself to read the presence
+// directory before giving up and starting with the plain instructions —
+// this must never delay (let alone block) server startup.
+const STARTUP_DIRECTORY_TIMEOUT_MS = 3000;
+const STARTUP_DIRECTORY_MAX_MEMBERS = 15;
+
+/**
+ * Best-effort: resolves context for the cwd and reads the presence
+ * directory, formatted compactly (`login — role — areas`, capped at 15
+ * members) for the server instructions. Returns `undefined` — never
+ * throws — when there's no repo context, no presence issue, no profiles, or
+ * this simply takes too long; `MCP_SERVER_INSTRUCTIONS` already points at
+ * `bus_team` for that case.
+ */
+export async function buildStartupDirectory(now: number = Date.now()): Promise<string | undefined> {
+  try {
+    const timeout = new Promise<undefined>((resolve) => {
+      setTimeout(() => resolve(undefined), STARTUP_DIRECTORY_TIMEOUT_MS);
+    });
+    const work = (async (): Promise<string | undefined> => {
+      const config = loadConfig();
+      const ctx = resolveContext(process.cwd(), config);
+      if (!isGitHubBus(ctx.bus) || ctx.bus.presence === undefined) return undefined;
+
+      const teamResolution = await resolveTeam(ctx);
+      const profiles = await getCachedProfiles(ctx.bus, {
+        isAllowedAuthor: allowedProfileAuthor(teamResolution),
+        now,
+      });
+      if (profiles.length === 0) return undefined;
+
+      const shown = profiles.slice(0, STARTUP_DIRECTORY_MAX_MEMBERS);
+      const lines = shown.map(
+        (p) => `${p.login} — ${p.role ?? '(no role)'} — ${p.areas.length ? p.areas.join(', ') : '(no areas)'}`,
+      );
+      const omitted = profiles.length - shown.length;
+      const more = omitted > 0 ? `\n(+${omitted} more — see bus_team)` : '';
+      return `Team directory (login — role — areas):\n${lines.join('\n')}${more}`;
+    })();
+
+    return await Promise.race([work, timeout]);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runMcpServer(): Promise<void> {
-  const server = createMcpServer();
+  const directory = await buildStartupDirectory();
+  const server = createMcpServer(directory);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
