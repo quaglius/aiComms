@@ -1,4 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { getConfigDir, getProjectDir } from './paths.js';
@@ -98,6 +108,99 @@ function saveHookState(project: string, state: HookState): void {
   writeFileSync(getHookStatePath(project), JSON.stringify({ notified: trimmed }, null, 2) + '\n', 'utf8');
 }
 
+// --- Notice-claiming lock -----------------------------------------------
+//
+// Both the plugin's hooks/hooks.json (npx) and `ai-comms hooks install`
+// (absolute node) can end up registered for the same Claude Code event at
+// once, and Claude Code runs matching hooks in parallel — so two `runHook`
+// (or `runHook` + `markNotified`) calls can each read hook-state.json before
+// either has written it back, and a given notice gets printed twice. A
+// short-lived lock file around the read-modify-write makes the claim atomic:
+// whichever process gets the lock first is the one that decides what's new.
+
+function getHookLockPath(project: string): string {
+  return path.join(getProjectDir(project), 'hook-state.lock');
+}
+
+/** How old a lock file has to be before it's assumed abandoned (its owner
+ *  crashed or was killed) and taken over rather than waited out. */
+const LOCK_STALE_MS = 5000;
+const LOCK_RETRY_INTERVAL_MS = 10;
+/** Total time a caller will wait for the lock before giving up. Small on
+ *  purpose: the hook's whole budget is ~300ms (SPEC-v0.7 §2.7), and losing
+ *  this race just means this run prints nothing — the run that won it still
+ *  prints (and saves) correctly. */
+const LOCK_WAIT_BUDGET_MS = 250;
+
+/**
+ * Blocks the current thread for `ms`. Only ever used for the brief retry
+ * between lock attempts: a Claude Code hook is a single synchronous script
+ * with a hard timeout, so there is no event loop to yield to while still
+ * guaranteeing the read-modify-write below stays atomic.
+ */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // Environments without Atomics.wait on a SharedArrayBuffer (shouldn't
+    // happen under the Node >=20 engines requirement): fall back to a tiny
+    // busy-wait rather than never retrying.
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* spin */
+    }
+  }
+}
+
+interface NoticeLock {
+  release(): void;
+}
+
+/**
+ * Exclusive, best-effort lock around a project's hook-state.json
+ * read-modify-write. `openSync(..., 'wx')` is create-exclusive, so the
+ * acquisition itself is atomic at the filesystem level. Returns `null` when
+ * the lock couldn't be acquired within `LOCK_WAIT_BUDGET_MS` — callers must
+ * treat that as "someone else has it right now" and skip their write rather
+ * than risk racing it.
+ */
+function acquireNoticeLock(project: string): NoticeLock | null {
+  const lockPath = getHookLockPath(project);
+  mkdirSync(getProjectDir(project), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_BUDGET_MS;
+
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return {
+        release: () => {
+          try {
+            unlinkSync(lockPath);
+          } catch {
+            // Already gone — e.g. taken over as stale by another process.
+          }
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(lockPath);
+          continue; // the stale lock is gone now — retry immediately.
+        }
+      } catch {
+        continue; // it vanished between the failed create and this stat — retry.
+      }
+
+      if (Date.now() >= deadline) return null;
+      sleepSync(LOCK_RETRY_INTERVAL_MS);
+    }
+  }
+}
+
 // --- Formatting ---------------------------------------------------------
 
 export { threadOf };
@@ -138,6 +241,15 @@ export function runHook(
 ): string {
   void kind;
 
+  // The auto-answerer launches `claude` headlessly, in the user's repo, to
+  // answer a bus question on their behalf. If the user's own SessionStart/
+  // UserPromptSubmit hooks also run inside that headless session (same cwd,
+  // same inherited hook config), they would mark the user's own pending
+  // notices as notified without the user ever having seen them. The
+  // answerer sets AI_COMMS_ANSWERER=1 in that subprocess's env only — bail
+  // out before touching anything.
+  if (process.env.AI_COMMS_ANSWERER) return '';
+
   let config: ConfigV2;
   try {
     config = loadConfig();
@@ -163,36 +275,125 @@ export function runHook(
   }
 
   const now = opts.now ?? new Date();
-  const state = loadHookState(project);
-  const alreadyNotified = new Set(state.notified);
 
-  const relevant = log.filter((env) => {
-    if (env.from.dev === dev) return false;
-    if (!NOTIFIED_TYPES.has(env.type)) return false;
-    if (!isDirectedTo(env, dev)) return false;
-    if (isExpired(env, now)) return false;
-    if (alreadyNotified.has(env.id)) return false;
-    return true;
+  // Everything from here on reads and then writes hook-state.json — do it
+  // under the notice-claiming lock so a concurrently-running hook (both the
+  // plugin's and an installed one firing for the same event) can't read the
+  // same "not yet notified" state we're about to act on.
+  const lock = acquireNoticeLock(project);
+  if (!lock) return ''; // another run holds it right now; don't risk a duplicate.
+
+  try {
+    const state = loadHookState(project);
+    const alreadyNotified = new Set(state.notified);
+
+    const relevant = log.filter((env) => {
+      if (env.from.dev === dev) return false;
+      if (!NOTIFIED_TYPES.has(env.type)) return false;
+      if (!isDirectedTo(env, dev)) return false;
+      if (isExpired(env, now)) return false;
+      if (alreadyNotified.has(env.id)) return false;
+      return true;
+    });
+
+    if (relevant.length === 0) return '';
+
+    // Most recent first, so the 5 shown (out of a possibly larger backlog) are
+    // the most relevant ones.
+    relevant.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+
+    const shown = relevant.slice(0, MAX_SHOWN);
+    const extra = relevant.length - shown.length;
+
+    const lines = shown.map(formatNoticeLine);
+    if (extra > 0) lines.push(`(+${extra} more)`);
+    lines.push('Use bus_inbox for details; reply to questions with bus_send type answer and reply_to.');
+
+    saveHookState(project, {
+      notified: [...state.notified, ...relevant.map((e) => e.id)],
+    });
+
+    return `${SECURITY_PREAMBLE}\n\n${lines.join('\n')}`;
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * Marks `ids` as already notified without printing anything. The MCP server
+ * calls this for a `bus_ask` reply it already returned inline to the caller,
+ * so the next hook run doesn't show that same answer again as if it were new
+ * (SPEC-v0.7 §2.7 fix: answers already returned inline being shown again).
+ * Uses the same lock as `runHook`'s read-modify-write.
+ */
+export function markNotified(project: string, ids: string[]): void {
+  if (ids.length === 0) return;
+  const lock = acquireNoticeLock(project);
+  try {
+    const state = loadHookState(project);
+    const merged = new Set([...state.notified, ...ids]);
+    saveHookState(project, { notified: [...merged] });
+  } finally {
+    lock?.release();
+  }
+}
+
+// --- Claude Code hook stdin handling -----------------------------------
+
+/**
+ * Claude Code hooks pipe a JSON payload on stdin and expect the process to
+ * exit promptly either way. We don't need that payload (the hook resolves
+ * everything itself from the local log and cwd), but an unread, unclosed
+ * stdin can leave the hook process hanging when stdin is a pipe rather than
+ * a TTY — so drain it, bounded by a short timeout in case it's never closed,
+ * and always pause+destroy the stream once we're done with it (whether it
+ * ended on its own or we hit the timeout) so an open pipe can't keep the
+ * process alive after `main()` returns.
+ *
+ * Shared by both `ai-comms hook <kind>` (src/cli.ts) and the lightweight
+ * `hook-entry.ts` bin/ai-comms.js dispatches to instead, so the fix applies
+ * to whichever one actually runs.
+ *
+ * `stdin` defaults to the real `process.stdin` and is only ever overridden
+ * by tests, so they can exercise the timeout/cleanup paths against an
+ * in-memory fake instead of a real OS pipe.
+ */
+export function drainStdin(timeoutMs = 200, stdin: NodeJS.ReadStream = process.stdin): Promise<void> {
+  return new Promise((resolve) => {
+    if (stdin.isTTY) {
+      resolve();
+      return;
+    }
+
+    let done = false;
+    const onData = () => {};
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      stdin.off('data', onData);
+      stdin.off('end', finish);
+      stdin.off('error', finish);
+      try {
+        stdin.pause();
+      } catch {
+        // ignore — best-effort cleanup only.
+      }
+      try {
+        stdin.destroy();
+      } catch {
+        // ignore
+      }
+      resolve();
+    };
+
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    stdin.on('data', onData);
+    stdin.once('end', finish);
+    stdin.once('error', finish);
+    stdin.resume();
   });
-
-  if (relevant.length === 0) return '';
-
-  // Most recent first, so the 5 shown (out of a possibly larger backlog) are
-  // the most relevant ones.
-  relevant.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
-
-  const shown = relevant.slice(0, MAX_SHOWN);
-  const extra = relevant.length - shown.length;
-
-  const lines = shown.map(formatNoticeLine);
-  if (extra > 0) lines.push(`(+${extra} more)`);
-  lines.push('Use bus_inbox for details; reply to questions with bus_send type answer and reply_to.');
-
-  saveHookState(project, {
-    notified: [...state.notified, ...relevant.map((e) => e.id)],
-  });
-
-  return `${SECURITY_PREAMBLE}\n\n${lines.join('\n')}`;
 }
 
 // --- ai-comms hooks install / uninstall -------------------------------------
@@ -270,6 +471,20 @@ export interface HookInstallOutcome {
  * Merges the `SessionStart`/`UserPromptSubmit` hooks into
  * `~/.claude/settings.json`, preserving every other hook and setting.
  * Idempotent: an event that already has one of our hooks is left alone.
+ *
+ * Note on the plugin/`hooks install` double-registration: the review finding
+ * asked us to also detect, here, when the ai-comms *plugin* (which ships its
+ * own `hooks/hooks.json`) is installed, and say so instead of installing a
+ * second copy. There is no dependable signal for that from this package
+ * alone — a plugin can be enabled via `~/.claude/settings.json`'s
+ * `enabledPlugins`, via a synced marketplace bucket under
+ * `~/.claude/plugins/synced/…`, or (in this session's own environment) not
+ * show up under a stable, documented key at all — so guessing at the format
+ * risks a false "not needed" that silently leaves the user with no hooks at
+ * all. We rely solely on the concurrency-safe lock in `runHook`/
+ * `markNotified` (acquireNoticeLock) to make a double-registration harmless
+ * (one duplicate print, never two) rather than trying to prevent the
+ * double-registration itself.
  */
 export function installClaudeHooks(opts: HookInstallOptions = {}): HookInstallOutcome {
   const home = opts.home ?? homedir();
@@ -387,7 +602,53 @@ export function computeAutoAnswerConfig(
     timeoutSeconds: prev?.timeoutSeconds ?? 120,
     maxAgeMinutes: prev?.maxAgeMinutes ?? 10,
   };
-  const resolvedRepoPath = repoPath ?? prev?.repoPath;
+  // A freshly-passed `--repo-path` is resolved to an absolute path before
+  // it's stored, whatever form the user typed it in (relative to cwd, `~`
+  // left un-expanded by the shell, a trailing slash, ...) — see
+  // `resolveAutoAnswerRepoPath`, which the `autoanswer` command runs first to
+  // validate it (existence, directory-ness, not $HOME, not a filesystem
+  // root) before ever reaching here. An already-stored `prev.repoPath` was
+  // resolved the same way when it was set, so it's left as-is.
+  const resolvedRepoPath = repoPath !== undefined ? path.resolve(repoPath) : prev?.repoPath;
   if (resolvedRepoPath !== undefined) next.repoPath = resolvedRepoPath;
   return next;
+}
+
+export class AutoAnswerConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutoAnswerConfigError';
+  }
+}
+
+/**
+ * Validates and resolves a `--repo-path` value for `ai-comms autoanswer on`:
+ * must resolve to a directory that exists, and must not be the user's home
+ * directory or a filesystem root (both are almost certainly a mistake — the
+ * auto-answerer would end up treating every repo on the machine as fair
+ * game). Returns the absolute path to store.
+ */
+export function resolveAutoAnswerRepoPath(repoPath: string): string {
+  const resolved = path.resolve(repoPath);
+
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+    throw new AutoAnswerConfigError(
+      `--repo-path "${repoPath}" does not exist or is not a directory (resolved to ${resolved}).`,
+    );
+  }
+
+  const home = path.resolve(homedir());
+  if (resolved === home) {
+    throw new AutoAnswerConfigError(
+      `--repo-path must not be your home directory (${resolved}) — point it at the directory ` +
+        `containing the repo checkout(s) the auto-answerer should read from.`,
+    );
+  }
+
+  const root = path.parse(resolved).root;
+  if (resolved === root) {
+    throw new AutoAnswerConfigError(`--repo-path must not be a filesystem root (${resolved}).`);
+  }
+
+  return resolved;
 }

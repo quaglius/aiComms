@@ -49,7 +49,15 @@ import { createTransport } from './transports/index.js';
 import { isDiscordBus, isGitHubBus } from './transports/types.js';
 import { getRepoCollaborators } from './collaborators.js';
 import { runSetup, writeMcpConfig } from './setup.js';
-import { computeAutoAnswerConfig, installClaudeHooks, runHook, uninstallClaudeHooks } from './hook.js';
+import {
+  AutoAnswerConfigError,
+  computeAutoAnswerConfig,
+  drainStdin,
+  installClaudeHooks,
+  resolveAutoAnswerRepoPath,
+  runHook,
+  uninstallClaudeHooks,
+} from './hook.js';
 import { fetchProfiles, renderDirectory } from './presence.js';
 import { createSpace, inviteToSpace, joinSpace, resolveSpaceRepo, runStatus } from './space.js';
 
@@ -381,6 +389,7 @@ async function runProfileSet(opts: { role?: string; areas?: string }): Promise<v
 
   console.log('Profile updated.');
   printProfile(config);
+  console.log('The running daemon picks this up within a minute.');
 }
 
 async function runProfileShow(): Promise<void> {
@@ -512,34 +521,16 @@ program
   });
 
 // --- SPEC-v0.7 §2.7: hook / hooks install / hooks uninstall -----------------
-
-/**
- * Claude Code hooks pipe a JSON payload on stdin and expect the process to
- * exit promptly either way. We don't need that payload (the hook resolves
- * everything itself from the local log and cwd), but an unread, unclosed
- * stdin can leave the hook process hanging when stdin is a pipe rather than
- * a TTY — so drain it, bounded by a short timeout in case it's never closed.
- */
-function drainStdin(timeoutMs = 200): Promise<void> {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
-      resolve();
-      return;
-    }
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    timer.unref?.();
-    process.stdin.on('data', () => {});
-    process.stdin.once('end', finish);
-    process.stdin.once('error', finish);
-    process.stdin.resume();
-  });
-}
+//
+// `ai-comms hook <kind>` itself is normally invoked via bin/ai-comms.js's
+// lightweight `dist/hook-entry.js` dispatch (see bin/ai-comms.js and
+// src/hook-entry.ts), not through this commander action — that's what keeps
+// a Claude Code hook from paying for this whole CLI (commander, the daemon,
+// discord.js, the MCP SDK) on every prompt. This command definition stays
+// here too so `ai-comms --help` still lists `hook`, and as a fallback for
+// anything that invokes dist/cli.js's `hook` subcommand directly. It must
+// keep matching hook-entry.ts's behavior exactly (same drainStdin, same
+// "never fails, always exits 0" contract).
 
 program
   .command('hook <kind>')
@@ -612,8 +603,29 @@ async function runAutoAnswerCommand(
   const ctx = resolveContext(process.cwd(), config, { projectOverride: options.project });
   const project = ctx.project;
 
+  // Validate/resolve --repo-path (existence, directory-ness, not $HOME, not
+  // a filesystem root) before anything is persisted, whether we're turning
+  // auto-answer on or off — see resolveAutoAnswerRepoPath.
+  const resolvedRepoPath =
+    options.repoPath !== undefined ? resolveAutoAnswerRepoPath(options.repoPath) : undefined;
+
   const prev = config.projects[project]?.autoAnswer;
-  const autoAnswer = computeAutoAnswerConfig(prev, state === 'on', options.repoPath);
+
+  if (state === 'on') {
+    const registeredRepos = config.projects[project]?.repos ?? [];
+    const effectiveRepoPath = resolvedRepoPath ?? prev?.repoPath;
+    // With zero or several repos registered for this project, the
+    // auto-answerer has no way to guess which checkout to read from; with
+    // exactly one, that one is unambiguous even without --repo-path.
+    if (!effectiveRepoPath && registeredRepos.length !== 1) {
+      throw new AutoAnswerConfigError(
+        `Project "${project}" has ${registeredRepos.length} registered repo${registeredRepos.length === 1 ? '' : 's'}. ` +
+          'Pass --repo-path <dir containing the repos> so the auto-answerer knows which checkout to read from.',
+      );
+    }
+  }
+
+  const autoAnswer = computeAutoAnswerConfig(prev, state === 'on', resolvedRepoPath);
 
   config.projects[project] = { ...(config.projects[project] ?? {}), autoAnswer };
   saveConfig(config);
@@ -625,26 +637,29 @@ async function runAutoAnswerCommand(
       (autoAnswer.repoPath ? `, repoPath=${autoAnswer.repoPath}` : ''),
   );
   console.log('\nNote: the daemon must be running for auto-answer to actually respond on the bus.');
-  if (!autoAnswer.repoPath) {
-    console.log(
-      'Note: a project with more than one registered repo needs --repo-path so the auto-answerer ' +
-        'knows which checkout to read from.',
-    );
-  }
+  console.log('The running daemon picks this up within a minute.');
 }
 
 program
   .command('autoanswer <state>')
   .description('Turn the auto-answerer on or off for a project (state: on|off)')
   .option('--project <p>', 'project')
-  .option('--repo-path <dir>', 'repo checkout the auto-answerer should read from (required for multi-repo projects)')
+  .option(
+    '--repo-path <dir>',
+    'repo checkout the auto-answerer should read from (required unless the project has exactly one registered repo)',
+  )
   .action(async (state: string, opts: { project?: string; repoPath?: string }) => {
     if (state !== 'on' && state !== 'off') {
       console.error('Usage: ai-comms autoanswer on|off [--project p] [--repo-path dir]');
       process.exitCode = 1;
       return;
     }
-    await runAutoAnswerCommand(state, opts);
+    try {
+      await runAutoAnswerCommand(state, opts);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
   });
 
 const profileCmd = program.command('profile').description('Your ai-comms presence profile');
