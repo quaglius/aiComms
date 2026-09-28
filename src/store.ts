@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -19,6 +20,7 @@ import {
 } from './paths.js';
 import {
   type Envelope,
+  type MessageType,
   EnvelopeSchema,
   globsOverlap,
   isDirectedTo,
@@ -62,6 +64,66 @@ function ensureProjectDir(project: string): void {
 }
 
 /**
+ * In-memory id index per log file, so a duplicate check doesn't have to
+ * reread and reparse the whole log on every `appendEnvelope` call.
+ *
+ * The MCP server and the daemon are different processes appending to the
+ * same file, so a size/mtime mismatch against what this process last saw is
+ * the signal that the on-disk log moved under us and the index must be
+ * rebuilt from scratch — trusting a stale in-memory set here would let a
+ * duplicate slip through undetected. Keyed by the resolved log path (not the
+ * project name alone) so it can never straddle two different `HOME`s that
+ * happen to share a project name, as tests that swap `HOME` between cases do.
+ */
+interface LogIndexEntry {
+  size: number;
+  mtimeMs: number;
+  ids: Set<string>;
+}
+
+const logIndexByPath = new Map<string, LogIndexEntry>();
+
+export function resetLogIndexForTests(): void {
+  logIndexByPath.clear();
+}
+
+function statLogFile(logPath: string): { size: number; mtimeMs: number } | null {
+  if (!existsSync(logPath)) return null;
+  const st = statSync(logPath);
+  return { size: st.size, mtimeMs: st.mtimeMs };
+}
+
+function getKnownIds(project: string): Set<string> {
+  const logPath = getProjectLogPath(project);
+  const stat = statLogFile(logPath);
+  const cached = logIndexByPath.get(logPath);
+  if (cached && stat && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    return cached.ids;
+  }
+  const ids = new Set(loadLog(project).map((e) => e.id));
+  logIndexByPath.set(logPath, { size: stat?.size ?? 0, mtimeMs: stat?.mtimeMs ?? 0, ids });
+  return ids;
+}
+
+/**
+ * Reflects a just-completed append in the cached index, when this process
+ * already holds one for this log. If it doesn't (this append's duplicate
+ * check was done against a caller-supplied `existing` list instead), the
+ * index is left absent rather than seeded incompletely — the next call that
+ * needs it will build a correct one from the full file via `getKnownIds`.
+ */
+function noteAppended(project: string, id: string): void {
+  const logPath = getProjectLogPath(project);
+  const cached = logIndexByPath.get(logPath);
+  if (!cached) return;
+  const stat = statLogFile(logPath);
+  if (!stat) return;
+  cached.ids.add(id);
+  cached.size = stat.size;
+  cached.mtimeMs = stat.mtimeMs;
+}
+
+/**
  * Append an envelope to the project log, deduping by id.
  *
  * Returns whether it was actually appended (`false` for a duplicate). Callers
@@ -76,10 +138,11 @@ export function appendEnvelope(
   existing?: Envelope[],
 ): boolean {
   const logPath = getProjectLogPath(project);
-  const known = existing ?? loadLog(project);
-  if (known.some((e) => e.id === envelope.id)) return false;
+  const knownIds = existing ? new Set(existing.map((e) => e.id)) : getKnownIds(project);
+  if (knownIds.has(envelope.id)) return false;
   ensureProjectDir(project);
   appendFileSync(logPath, JSON.stringify(envelope) + '\n', 'utf8');
+  noteAppended(project, envelope.id);
   return true;
 }
 
@@ -411,4 +474,129 @@ export function releaseDaemonLock(pid = process.pid): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * How long past its own `ttl` an envelope is still kept by `compactLog`. An
+ * envelope that hasn't expired yet, or expired recently, stays — it's still
+ * useful context (thread history, recent decisions). One that expired more
+ * than this long ago is compacted away unless one of `compactLog`'s other
+ * two rules keeps it.
+ */
+const COMPACT_TTL_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Types kept by their own most-recent-200 rule regardless of `ttl` age. */
+const COMPACT_KEEP_RECENT_TYPES: readonly MessageType[] = ['contract', 'done', 'fyi'];
+
+const COMPACT_KEEP_RECENT_COUNT = 200;
+
+export interface CompactResult {
+  kept: number;
+  removed: number;
+}
+
+/**
+ * Rewrites the project log to only the envelopes worth keeping, per SPEC
+ * v0.7 §4:
+ *
+ * - any envelope whose `ttl` hasn't expired, or expired less than 7 days ago;
+ * - any envelope that is an *active* claim right now (`materializeActiveClaims`),
+ *   regardless of its own `ttl` — a claim's `refs.until` can outlive its 24h
+ *   default `ttl`, and the claim must stay enforceable in the log while active;
+ * - the most recent 200 `contract`/`done`/`fyi` envelopes (each type counted
+ *   separately), regardless of `ttl` age — recent team decisions are worth
+ *   keeping around even once their own `ttl` has long passed.
+ *
+ * The rewrite is atomic: a temp file is written and then renamed over the
+ * log, so a crash mid-compact never leaves a partially-written log in place.
+ * Meant to be run by the daemon on startup and roughly every 24h — this
+ * module does not schedule it itself.
+ */
+export function compactLog(project: string, now = new Date()): CompactResult {
+  const all = loadLog(project);
+  if (all.length === 0) return { kept: 0, removed: 0 };
+
+  const activeClaimIds = new Set(materializeActiveClaims(all, now).map((c) => c.id));
+
+  const recentTypeIds = new Set<string>();
+  for (const type of COMPACT_KEEP_RECENT_TYPES) {
+    const ofType = all.filter((e) => e.type === type);
+    for (const e of ofType.slice(-COMPACT_KEEP_RECENT_COUNT)) {
+      recentTypeIds.add(e.id);
+    }
+  }
+
+  const nowMs = now.getTime();
+  const kept = all.filter((e) => {
+    if (activeClaimIds.has(e.id)) return true;
+    if (recentTypeIds.has(e.id)) return true;
+    const ttlMs = new Date(e.ttl).getTime();
+    return nowMs - ttlMs <= COMPACT_TTL_GRACE_MS;
+  });
+
+  if (kept.length === all.length) {
+    return { kept: kept.length, removed: 0 };
+  }
+
+  const logPath = getProjectLogPath(project);
+  ensureProjectDir(project);
+  const tmpPath = path.join(getProjectDir(project), `.log.compact-${process.pid}-${Date.now()}.tmp`);
+  const body = kept.map((e) => JSON.stringify(e)).join('\n');
+  writeFileSync(tmpPath, kept.length ? body + '\n' : '', 'utf8');
+  renameSync(tmpPath, logPath);
+
+  // The file just changed size/mtime out from under whatever this process
+  // had cached for it.
+  logIndexByPath.delete(logPath);
+
+  return { kept: kept.length, removed: all.length - kept.length };
+}
+
+function getAnswerSessionsPath(project: string): string {
+  return path.join(getProjectDir(project), 'answer-sessions.json');
+}
+
+/** Cap on `answer-sessions.json` entries: an unbounded map would grow forever
+ *  as new threads open, most of them never revisited. */
+const MAX_ANSWER_SESSIONS = 200;
+
+export function loadAnswerSessions(project: string): Record<string, string> {
+  const sessionsPath = getAnswerSessionsPath(project);
+  if (!existsSync(sessionsPath)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(sessionsPath, 'utf8')) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return raw as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+/** The `claude` session id memorized for this thread, or `null` if there isn't one. */
+export function getAnswerSession(project: string, thread: string): string | null {
+  const sessions = loadAnswerSessions(project);
+  return typeof sessions[thread] === 'string' ? sessions[thread] : null;
+}
+
+/**
+ * Remembers `sessionId` for `thread`, so the next ask in the same thread can
+ * `--resume` it. Kept to the most recently *used* (set or refreshed) 200
+ * threads: an existing entry is deleted before being re-added so it moves to
+ * the end of insertion order, which is what makes "most recent" meaningful
+ * here rather than "first seen".
+ */
+export function saveAnswerSession(project: string, thread: string, sessionId: string): void {
+  const sessions = loadAnswerSessions(project);
+  if (thread in sessions) delete sessions[thread];
+  sessions[thread] = sessionId;
+
+  const keys = Object.keys(sessions);
+  if (keys.length > MAX_ANSWER_SESSIONS) {
+    for (const staleKey of keys.slice(0, keys.length - MAX_ANSWER_SESSIONS)) {
+      delete sessions[staleKey];
+    }
+  }
+
+  ensureProjectDir(project);
+  writeFileSync(getAnswerSessionsPath(project), JSON.stringify(sessions, null, 2) + '\n', 'utf8');
 }

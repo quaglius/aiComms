@@ -41,33 +41,70 @@ export type AgentSpecResult = ReadOnlyAgentSpec | UnsupportedAgent;
  * This list is deliberately broad and deliberately not configurable: a project
  * that needs one of these paths to answer a question is asking the wrong
  * question.
+ *
+ * `.env.*` is spelled out explicitly rather than denied with one glob: a repo
+ * commits `.env.example` / `.env.sample` / `.env.template` / `.env.dist` for
+ * teammates to copy, and those files carry no real secrets — denying them too
+ * would make the answerer unable to tell a new teammate what env vars a
+ * feature needs. Listing only the local/environment-specific variants keeps
+ * those templates readable while still denying every file that could hold a
+ * real value.
+ *
+ * SPEC v0.7 §4 verified these flags against the real `claude` 2.1.x CLI: with
+ * `--permission-mode dontAsk` and `Read(./**\/)`, a read outside the cwd is
+ * denied, `Read(./**\/.env.local)` in `--disallowedTools` is denied, and
+ * `.env.example` is readable.
  */
 const SECRET_PATH_DENIES = [
-  '**/.env',
-  '**/.env.*',
-  '**/*.env',
-  '**/secrets*',
-  '**/*secret*',
-  '**/*credential*',
-  '**/*.pem',
-  '**/*.key',
-  '**/*.p12',
-  '**/*.pfx',
-  '**/id_rsa*',
-  '**/id_ed25519*',
-  '**/.npmrc',
-  '**/.netrc',
-  '**/.git-credentials',
-  '**/.aws/**',
-  '**/.ssh/**',
-  '**/.gnupg/**',
-  '**/.ai-comms/**',
+  '.env',
+  '.env.local',
+  '.env.*.local',
+  '.env.development',
+  '.env.dev',
+  '.env.production',
+  '.env.prod',
+  '.env.staging',
+  '.env.test',
+  '*.env',
+  'secrets*',
+  '*secret*',
+  '*credential*',
+  '*.pem',
+  '*.key',
+  '*.p12',
+  '*.pfx',
+  'id_rsa*',
+  'id_ed25519*',
+  '.npmrc',
+  '.netrc',
+  '.git-credentials',
+  '.aws/**',
+  '.ssh/**',
+  '.gnupg/**',
+  '.ai-comms/**',
+  '*.tfstate*',
+  '*.tfvars',
+  'appsettings.*.json',
+  'serviceAccount*.json',
+  '*service-account*.json',
+  '.pgpass',
+  '.kube/**',
+  '.docker/config.json',
+  '.vault-token',
+  'firebase-adminsdk*.json',
 ];
 
+/**
+ * Every deny, scoped under the cwd with `./**\/` so it holds regardless of
+ * where inside the repo the answerer looks, and repeated for each of the
+ * three read-shaped tools so a secret can't be lifted out with a search
+ * instead of an open.
+ */
 function secretDenyRules(): string[] {
   const rules: string[] = [];
   for (const glob of SECRET_PATH_DENIES) {
-    rules.push(`Read(${glob})`, `Grep(${glob})`, `Glob(${glob})`);
+    const scoped = `./**/${glob}`;
+    rules.push(`Read(${scoped})`, `Grep(${scoped})`, `Glob(${scoped})`);
   }
   return rules;
 }
@@ -76,22 +113,50 @@ export function isReadOnlyAgentSupported(agent: string): boolean {
   return agent === 'claude-code';
 }
 
+export interface BuildAgentSpecOptions {
+  /**
+   * A prior `claude` session id for this thread (`~/.ai-comms/projects/<p>/
+   * answer-sessions.json`). When set, the launch resumes it with `--resume`
+   * so the CLI keeps its own memory of the conversation across separate asks
+   * in the same thread, on top of the thread history already in the prompt.
+   */
+  sessionId?: string;
+}
+
 export function buildReadOnlyAgentSpec(
   agent: string,
   prompt: string,
   cwd: string,
+  options: BuildAgentSpecOptions = {},
 ): AgentSpecResult {
   switch (agent) {
-    case 'claude-code':
+    case 'claude-code': {
+      const args = [
+        '-p',
+        '--permission-mode',
+        'dontAsk',
+        '--strict-mcp-config',
+        '--setting-sources',
+        'user',
+        '--output-format',
+        'json',
+        '--allowedTools',
+        'Read(./**)',
+        'Grep(./**)',
+        'Glob(./**)',
+        '--disallowedTools',
+        ...secretDenyRules(),
+      ];
+      if (options.sessionId) {
+        args.push('--resume', options.sessionId);
+      }
       return {
-        launch: {
-          command: 'claude',
-          args: ['-p', '--allowedTools', 'Read,Grep,Glob', '--disallowedTools', ...secretDenyRules()],
-          cwd,
-          stdin: prompt,
-        },
-        restriction: `--allowedTools Read,Grep,Glob with ${SECRET_PATH_DENIES.length} secret path denies`,
+        launch: { command: 'claude', args, cwd, stdin: prompt },
+        restriction:
+          `--permission-mode dontAsk --allowedTools Read(./**),Grep(./**),Glob(./**) ` +
+          `with ${SECRET_PATH_DENIES.length} secret path denies`,
       };
+    }
     case 'cursor':
       // `cursor-agent --mode ask` will not write, but it exposes no way to deny
       // reads of specific paths, so a crafted question could still walk out of
@@ -159,4 +224,39 @@ export function runHeadlessAgent(
       resolve({ stdout: output, exitCode: code });
     });
   });
+}
+
+export interface ParsedAgentOutput {
+  /** The answer text: `result` from the JSON payload, or the raw stdout. */
+  text: string;
+  /** `session_id` from the JSON payload, so the thread can `--resume` it next time. */
+  sessionId: string | null;
+  /** `is_error` from the JSON payload, or `true` when the process exited non-zero. */
+  isError: boolean;
+}
+
+/**
+ * `--output-format json` makes `claude -p` print `{"result": "...",
+ * "session_id": "...", "is_error": false, ...}` on success. Parse that; if
+ * stdout isn't JSON (a crash before the CLI could format output, a version
+ * that doesn't support the flag, stderr text captured as a fallback by
+ * `runHeadlessAgent`), fall back to using the raw text as the answer.
+ */
+export function parseAgentOutput(output: { stdout: string; exitCode: number | null }): ParsedAgentOutput {
+  const raw = output.stdout.trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { result?: unknown; session_id?: unknown; is_error?: unknown };
+      if (parsed && typeof parsed === 'object' && typeof parsed.result === 'string') {
+        return {
+          text: parsed.result,
+          sessionId: typeof parsed.session_id === 'string' ? parsed.session_id : null,
+          isError: Boolean(parsed.is_error) || output.exitCode !== 0,
+        };
+      }
+    } catch {
+      // not JSON: fall through to the raw-text fallback below
+    }
+  }
+  return { text: raw, sessionId: null, isError: output.exitCode !== 0 };
 }

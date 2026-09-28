@@ -36,7 +36,10 @@ budget, hence the compact serialization on both transports.
   },
   "reply_to": "01J7...",       // null if not replying to anything
   "hops": 0,                   // +1 per chained automatic reply
-  "ttl": "2026-09-17T12:00:00Z"
+  "ttl": "2026-09-17T12:00:00Z",
+  "thread": null,               // optional, see "Threads" below
+  "answered_by": "agent",       // optional, only on `answer`
+  "needs_human": false          // optional, only on `ask`/`need`
 }
 ```
 
@@ -49,6 +52,54 @@ unreadable envelope on the bus.
 
 `refs.pr` is a **full URL**, not a number: a project may have repos on more
 than one forge (GitHub, GitLab) and a bare `42` doesn't say which one.
+
+## Versions
+
+`v` is `1` or `2`. A sender emits `v: 2` only when the envelope actually
+carries one of the three fields below (`thread`, `answered_by`,
+`needs_human`); otherwise it emits plain `v: 1`, byte-for-byte what a
+pre-0.7 reader already understands — those readers ignore fields they don't
+recognize, so a `v: 2` envelope still degrades gracefully for them, just
+without threading or the "not validated" marking.
+
+## Threads
+
+`thread` is the id of the envelope that started the conversation. A message
+that starts a thread can leave it unset: `threadOf(envelope)` is `envelope.thread
+?? envelope.id`, so the envelope is its own thread root by default. A reply
+that wants to continue a specific conversation (rather than start a new one)
+sets `thread` to that root's id.
+
+This is for grouping and for the auto-answerer's memory (see below) — it is
+not a delivery mechanism. Whether a message is shown to you still follows
+`to`/`hops`/`ttl` exactly as before; `thread` only says which earlier
+messages belong to the same conversation as this one.
+
+## `answered_by`: who stands behind an `answer`
+
+Only meaningful on `answer`. Two values:
+
+- `'human'` — a person explicitly approved this answer's content before it
+  was sent.
+- `'agent'` — nobody did. This includes every answer from the headless
+  auto-answerer, and any `answer` sent without the field at all: **an
+  `answer` with `answered_by` absent is treated exactly like `'agent'` when
+  displayed** — the absence of a human's explicit sign-off, not the absence
+  of the field, is what matters.
+
+Any `answer` that isn't `'human'` is shown marked as
+**"(automated answer from X's AI — not validated by X)"**. This marking is
+about trust, not about where the text came from: an agent-drafted answer a
+person then reviewed and sent with human approval is `'human'`; the same
+text sent straight from the auto-answerer is `'agent'`.
+
+## `needs_human`
+
+Set on `ask`/`need` to say this question needs an actual person's decision —
+approving a merge, picking between options, anything the recipient's
+auto-answerer must not decide on its own. `needs_human: true` **never**
+triggers the auto-answerer, unconditionally, regardless of every other
+auto-answer setting.
 
 ## Types
 

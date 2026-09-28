@@ -272,22 +272,61 @@ describe('unsupported agent CLI', () => {
     });
   });
 
-  it('launches claude-code with read-only tool restriction', () => {
+  it('launches claude-code with the SPEC v0.7 §4 hardened flags', () => {
+    // Contract updated by SPEC v0.7 §4 (verified against the real `claude`
+    // 2.1.x CLI): `--permission-mode dontAsk`, scoped `Read(./**)` etc., and
+    // every disallow scoped under the cwd with `./**/`.
     const spec = buildReadOnlyAgentSpec('claude-code', 'answer this', '/repo');
     assert.ok(!('error' in spec));
     if (!('error' in spec)) {
-      assert.deepEqual(spec.launch.args.slice(0, 3), ['-p', '--allowedTools', 'Read,Grep,Glob']);
-      assert.equal(spec.launch.args[3], '--disallowedTools');
+      assert.deepEqual(spec.launch.args.slice(0, 11), [
+        '-p',
+        '--permission-mode',
+        'dontAsk',
+        '--strict-mcp-config',
+        '--setting-sources',
+        'user',
+        '--output-format',
+        'json',
+        '--allowedTools',
+        'Read(./**)',
+        'Grep(./**)',
+      ]);
+      assert.ok(spec.launch.args.includes('Glob(./**)'));
+      assert.ok(spec.launch.args.includes('--disallowedTools'));
       // Read-only stops the answerer writing; it does nothing to stop it
       // disclosing, and the answer is published to the channel.
-      for (const secret of ['Read(**/.env)', 'Grep(**/.env)', 'Read(**/*credential*)', 'Read(**/.ssh/**)']) {
+      for (const secret of [
+        'Read(./**/.env)',
+        'Grep(./**/.env)',
+        'Read(./**/*credential*)',
+        'Read(./**/.ssh/**)',
+        'Read(./**/.env.local)',
+        'Read(./**/*.tfstate*)',
+        'Read(./**/serviceAccount*.json)',
+      ]) {
         assert.ok(spec.launch.args.includes(secret), `falta la denegación ${secret}`);
       }
+      // `.env.example` must stay readable — SPEC v0.7 §5 acceptance criterion 6.
+      assert.ok(!spec.launch.args.includes('Read(./**/.env.example)'));
+      assert.ok(!spec.launch.args.includes('Read(./**/.env.*)'));
       assert.equal(spec.launch.stdin, 'answer this');
       assert.ok(
         !spec.launch.args.includes('answer this'),
         'el prompt es texto de un tercero: nunca en argv',
       );
+    }
+  });
+
+  it('adds --resume when a session id is supplied', () => {
+    const spec = buildReadOnlyAgentSpec('claude-code', 'answer this', '/repo', {
+      sessionId: 'SESSION123',
+    });
+    assert.ok(!('error' in spec));
+    if (!('error' in spec)) {
+      const idx = spec.launch.args.indexOf('--resume');
+      assert.ok(idx !== -1, '--resume must be present when a sessionId is given');
+      assert.equal(spec.launch.args[idx + 1], 'SESSION123');
     }
   });
 

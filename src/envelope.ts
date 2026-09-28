@@ -31,9 +31,12 @@ export const RefsSchema = z
   })
   .strict();
 
+export const ANSWERED_BY_VALUES = ['agent', 'human'] as const;
+export type AnsweredBy = (typeof ANSWERED_BY_VALUES)[number];
+
 export const EnvelopeSchema = z
   .object({
-    v: z.literal(1),
+    v: z.union([z.literal(1), z.literal(2)]),
     id: z.string().min(1),
     ts: isoDate,
     from: FromSchema,
@@ -45,6 +48,16 @@ export const EnvelopeSchema = z
     reply_to: z.string().nullable().default(null),
     hops: z.number().int().min(0).max(3),
     ttl: isoDate,
+    /** Id of the root envelope of this conversation. `threadOf` falls back to
+     *  `id` when absent, so a message that starts a thread need not set it. */
+    thread: z.string().min(1).nullable().optional(),
+    /** Only meaningful on `answer`. Absent (or read as absent by an older
+     *  client) means the same as `'agent'`: nobody validated it — see
+     *  `threadOf` and docs/PROTOCOL.md. */
+    answered_by: z.enum(ANSWERED_BY_VALUES).optional(),
+    /** On `ask`/`need`: this question needs a human decision and must never
+     *  trigger the auto-answerer. */
+    needs_human: z.boolean().optional(),
   })
   .strict();
 
@@ -59,6 +72,9 @@ export const SendInputShape = {
   to: z.array(z.string().min(1)).optional(),
   refs: RefsSchema.optional(),
   reply_to: z.string().nullable().optional(),
+  thread: z.string().min(1).nullable().optional(),
+  answered_by: z.enum(ANSWERED_BY_VALUES).optional(),
+  needs_human: z.boolean().optional(),
 } as const;
 
 export const SendInputSchema = z.object(SendInputShape).strict();
@@ -98,8 +114,21 @@ export function createEnvelope(
   overrides?: Partial<Pick<Envelope, 'id' | 'ts' | 'hops' | 'ttl'>>,
 ): Envelope {
   const ts = overrides?.ts ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  // v:2 is emitted only when one of the new fields is actually present —
+  // a v:1 envelope must round-trip byte-for-byte the way a pre-0.7 reader
+  // expects, so we must not add the keys at all when they're unset (a zod
+  // `.optional()` key present with value `undefined` is still a distinct own
+  // key from an absent one, and would break that round-trip and any strict
+  // deep-equality check on the parsed envelope).
+  const newFields: Partial<Pick<Envelope, 'thread' | 'answered_by' | 'needs_human'>> = {};
+  if (input.thread !== undefined) newFields.thread = input.thread;
+  if (input.answered_by !== undefined) newFields.answered_by = input.answered_by;
+  if (input.needs_human !== undefined) newFields.needs_human = input.needs_human;
+  const v = Object.keys(newFields).length > 0 ? 2 : 1;
+
   return EnvelopeSchema.parse({
-    v: 1,
+    v,
     id: overrides?.id ?? ulid(),
     ts,
     from,
@@ -111,7 +140,17 @@ export function createEnvelope(
     reply_to: input.reply_to ?? null,
     hops: overrides?.hops ?? 0,
     ttl: overrides?.ttl ?? defaultTtl(ts),
+    ...newFields,
   });
+}
+
+/**
+ * The id of the conversation root: `envelope.thread` when set, otherwise the
+ * envelope's own id (it *is* the root). Use this — never `envelope.thread`
+ * directly — to compare whether two envelopes belong to the same thread.
+ */
+export function threadOf(envelope: Envelope): string {
+  return envelope.thread ?? envelope.id;
 }
 
 export function isExpired(envelope: Envelope, now = new Date()): boolean {
