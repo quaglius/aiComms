@@ -17,6 +17,8 @@ export interface CreateTransportOptions {
   setEtag?: (etag: string | undefined) => void;
   githubToken?: string;
   discordToken?: string;
+  isAllowedAuthor?: (login: string) => boolean;
+  onRejectedAuthor?: (login: string, commentId: number) => void;
 }
 
 export function createTransport(
@@ -34,6 +36,8 @@ export function createTransport(
       onIdentityMismatch: options.onIdentityMismatch,
       getEtag: options.getEtag,
       setEtag: options.setEtag,
+      isAllowedAuthor: options.isAllowedAuthor,
+      onRejectedAuthor: options.onRejectedAuthor,
     });
   }
 

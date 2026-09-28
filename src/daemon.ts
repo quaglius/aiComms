@@ -7,10 +7,13 @@ import type { ConfigV2 } from './config.js';
 import { loadConfig } from './config.js';
 import { runAutoAnswer } from './auto-answer.js';
 import type { Envelope } from './envelope.js';
+import type { Transport } from './transports/types.js';
 import {
+  acquireDaemonLock,
   appendEnvelope,
   getDaemonLogPath,
   loadCursor,
+  releaseDaemonLock,
   saveCursor,
   writeDaemonPid,
   removeDaemonPid,
@@ -20,9 +23,18 @@ import { createTransport } from './transports/index.js';
 import { isDiscordBus, type GitHubBusConfig } from './transports/types.js';
 import { collectDiscordBindings, runDiscordGateway } from './transports/discord-gateway.js';
 import { loadRepoComms, resolveBusFromRepoComms, resolveContext } from './context.js';
+import { getRepoCollaborators } from './collaborators.js';
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const GITHUB_POLL_MS = 15_000;
+/** whoami() hits `GET /user`; re-checking it every 15s poll is pure cost for
+ *  an identity that essentially never changes mid-session. */
+const WHOAMI_CACHE_MS = 10 * 60 * 1000;
+/** How long to go without retrying collaborators after a failed listing
+ *  (typically a 403: GitHub requires write access on the repo for that
+ *  endpoint, so a read-only teammate's daemon can never list it). Matches the
+ *  success-case cache TTL in collaborators.ts. */
+const COLLABORATORS_UNAVAILABLE_MS = 60 * 60 * 1000;
 
 interface GitHubBinding {
   project: string;
@@ -124,7 +136,15 @@ function notifyAutoAnswerFailure(message: string): void {
   }
 }
 
-/** Persist every valid envelope; notify only for messages from other devs. */
+/**
+ * Persist every valid envelope; notify and auto-answer only for messages from
+ * other devs, and only when the envelope is actually new.
+ *
+ * `appendEnvelope` dedupes by id, but a re-ingest (backfill overlapping a
+ * poll, a daemon restart replaying the backlog) must not repeat the side
+ * effects: relaunching the answerer for an ask it already answered, or a
+ * second desktop notification for the same message.
+ */
 export function ingestEnvelope(
   envelope: Envelope,
   project: string,
@@ -132,15 +152,22 @@ export function ingestEnvelope(
   config?: ConfigV2,
   verbose = false,
 ): { notified: boolean } {
-  appendEnvelope(envelope, project);
+  const appended = appendEnvelope(envelope, project);
+  if (!appended) return { notified: false };
 
   if (config) {
-    void runAutoAnswer(envelope, project, config, (message) => {
-      daemonLog(project, message, verbose);
-      if (/auto-answer (failed|produced no answer)/.test(message)) {
-        notifyAutoAnswerFailure(message);
-      }
-    });
+    void runAutoAnswer(
+      envelope,
+      project,
+      config,
+      (message) => {
+        daemonLog(project, message, verbose);
+        if (/auto-answer (failed|produced no answer)/.test(message)) {
+          notifyAutoAnswerFailure(message);
+        }
+      },
+      { dev },
+    );
   }
 
   if (envelope.from.dev === dev) return { notified: false };
@@ -166,15 +193,105 @@ function collectGitHubBindings(config: ConfigV2): GitHubBinding[] {
   return bindings;
 }
 
-async function pollGitHubBinding(
+interface WhoamiCacheEntry {
+  dev: string;
+  fetchedAt: number;
+}
+
+const whoamiCache = new Map<string, WhoamiCacheEntry>();
+const collaboratorsUnavailableUntil = new Map<string, number>();
+const collaboratorsWarned = new Set<string>();
+
+export function resetDaemonCachesForTests(): void {
+  whoamiCache.clear();
+  collaboratorsUnavailableUntil.clear();
+  collaboratorsWarned.clear();
+}
+
+/**
+ * The authenticated login for a binding, refreshed at most every
+ * {@link WHOAMI_CACHE_MS} (or sooner on failure, to retry rather than stick
+ * with a stale identity).
+ *
+ * whoami() hits `GET /user`. Calling it on every 15s poll, for every project,
+ * is a `gh`/GitHub API request that buys nothing — the authenticated login
+ * essentially never changes mid-session.
+ */
+export async function resolveDev(
+  binding: GitHubBinding,
+  transport: Transport,
+  config: ConfigV2,
+  verbose: boolean,
+  now = Date.now(),
+): Promise<string> {
+  const cached = whoamiCache.get(binding.project);
+  if (cached && now - cached.fetchedAt < WHOAMI_CACHE_MS) {
+    return cached.dev;
+  }
+  try {
+    const dev = (await transport.whoami()).dev;
+    whoamiCache.set(binding.project, { dev, fetchedAt: now });
+    return dev;
+  } catch (err) {
+    daemonLog(binding.project, `whoami failed: ${String(err)}`, verbose);
+    if (cached) return cached.dev;
+    return config.identity?.dev ?? '';
+  }
+}
+
+/**
+ * Builds the collaborator allowlist for a binding, so inbound comments from
+ * accounts that are not on the repo are never ingested — "private by
+ * default" otherwise only holds for who can *read* the bus, not who can
+ * *post* to it (on a public repo, that's anyone with a GitHub account).
+ *
+ * `getRepoCollaborators` requires write/maintain/admin on the repo, so a
+ * read-only teammate's daemon gets a 403 every time. Rather than fail
+ * silently or spam the log every 15s, this accepts all authors (unfiltered
+ * is the pre-existing behavior) and logs a single warning per project,
+ * backing off from retrying the listing for an hour.
+ */
+export async function buildAuthorFilter(
+  binding: GitHubBinding,
+  verbose: boolean,
+  now = Date.now(),
+): Promise<((login: string) => boolean) | undefined> {
+  const unavailableUntil = collaboratorsUnavailableUntil.get(binding.project);
+  if (unavailableUntil && now < unavailableUntil) {
+    return undefined;
+  }
+
+  try {
+    const collaborators = await getRepoCollaborators(binding.bus.repo);
+    collaboratorsUnavailableUntil.delete(binding.project);
+    const allowed = new Set(collaborators);
+    return (login) => allowed.has(login);
+  } catch (err) {
+    collaboratorsUnavailableUntil.set(binding.project, now + COLLABORATORS_UNAVAILABLE_MS);
+    if (!collaboratorsWarned.has(binding.project)) {
+      collaboratorsWarned.add(binding.project);
+      daemonLog(
+        binding.project,
+        `Could not list collaborators for ${binding.bus.repo} (${String(err)}). GitHub requires ` +
+          "write/maintain/admin access on the repo for that endpoint, so a read-only teammate's " +
+          'daemon always gets a 403 here. Inbound authors are NOT being filtered by team membership ' +
+          `for project "${binding.project}" until this succeeds.`,
+        verbose,
+      );
+    }
+    return undefined;
+  }
+}
+
+async function githubTransportForBinding(
   binding: GitHubBinding,
   config: ConfigV2,
   verbose: boolean,
-): Promise<void> {
-  const cursor = loadCursor(binding.project);
-
+  cursor: ReturnType<typeof loadCursor>,
+) {
   const ctx = resolveContext(binding.repoPath, config, { projectOverride: binding.project });
-  const transport = createTransport(ctx, config, {
+  const isAllowedAuthor = await buildAuthorFilter(binding, verbose);
+  return createTransport(ctx, config, {
     onIdentityMismatch: (declared, actual, commentId) => {
       daemonLog(
         binding.project,
@@ -188,14 +305,25 @@ async function pollGitHubBinding(
         saveCursor(binding.project, { ...loadCursor(binding.project), etag });
       }
     },
+    isAllowedAuthor,
+    onRejectedAuthor: (login, commentId) => {
+      daemonLog(
+        binding.project,
+        `rejected comment ${commentId} from "${login}": not a collaborator on ${binding.bus.repo}`,
+        verbose,
+      );
+    },
   });
+}
 
-  let dev = config.identity?.dev ?? '';
-  try {
-    dev = (await transport.whoami()).dev;
-  } catch (err) {
-    daemonLog(binding.project, `whoami failed: ${String(err)}`, verbose);
-  }
+async function pollGitHubBinding(
+  binding: GitHubBinding,
+  config: ConfigV2,
+  verbose: boolean,
+): Promise<void> {
+  const cursor = loadCursor(binding.project);
+  const transport = await githubTransportForBinding(binding, config, verbose, cursor);
+  const dev = await resolveDev(binding, transport, config, verbose);
 
   const result = await transport.fetchSince(cursor?.lastSince ?? null);
 
@@ -221,30 +349,8 @@ async function backfillGitHubBinding(
   verbose: boolean,
 ): Promise<void> {
   const cursor = loadCursor(binding.project);
-
-  const ctx = resolveContext(binding.repoPath, config, { projectOverride: binding.project });
-  const transport = createTransport(ctx, config, {
-    onIdentityMismatch: (declared, actual, commentId) => {
-      daemonLog(
-        binding.project,
-        `identity mismatch on comment ${commentId}: payload declared "${declared}", GitHub author "${actual}"`,
-        verbose,
-      );
-    },
-    getEtag: () => cursor?.etag,
-    setEtag: (etag) => {
-      if (etag) {
-        saveCursor(binding.project, { ...loadCursor(binding.project), etag });
-      }
-    },
-  });
-
-  let dev = config.identity?.dev ?? '';
-  try {
-    dev = (await transport.whoami()).dev;
-  } catch {
-    // logged on poll
-  }
+  const transport = await githubTransportForBinding(binding, config, verbose, cursor);
+  const dev = await resolveDev(binding, transport, config, verbose);
 
   const result = await (transport.backfill?.(cursor?.lastSince ?? null) ??
     transport.fetchSince(cursor?.lastSince ?? null));
@@ -288,6 +394,26 @@ function buildDiscordBusMap(config: ConfigV2): Map<string, { kind: 'discord'; ch
 
 export async function runDaemon(options: { verbose?: boolean } = {}): Promise<void> {
   const verbose = options.verbose ?? false;
+
+  // Two daemons on the same bus — an autostarted one plus a manually run
+  // one, or a laptop and a desktop both online — would each answer the same
+  // question, doubling every auto-answer. Acquire the single-instance lock
+  // before anything else so a second `ai-comms daemon` fails fast and says
+  // why, instead of quietly running alongside the first.
+  const lock = acquireDaemonLock();
+  if (!lock.acquired) {
+    throw new Error(`ai-comms daemon is already running (pid ${lock.pid}).`);
+  }
+
+  try {
+    await runDaemonLocked(verbose);
+  } catch (err) {
+    releaseDaemonLock();
+    throw err;
+  }
+}
+
+async function runDaemonLocked(verbose: boolean): Promise<void> {
   const config = loadConfig();
 
   const discordBusMap = buildDiscordBusMap(config);
@@ -361,6 +487,7 @@ export async function runDaemon(options: { verbose?: boolean } = {}): Promise<vo
     for (const client of clients) {
       client.destroy();
     }
+    releaseDaemonLock();
     process.exit(0);
   };
 

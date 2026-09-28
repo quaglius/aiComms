@@ -29,6 +29,17 @@ export interface GitHubTransportOptions {
   onIdentityMismatch?: (declared: string, actual: string, commentId: number) => void;
   getEtag?: () => string | undefined;
   setEtag?: (etag: string | undefined) => void;
+  /**
+   * Restricts which GitHub logins get read as bus envelopes. On a public
+   * repo, anyone who can comment can otherwise post an envelope — the
+   * identity is authenticated (it really is that GitHub account), but
+   * nothing says that account is on the team. When set, a comment from a
+   * login this rejects is skipped entirely (the cursor still advances past
+   * it, so it is never retried).
+   */
+  isAllowedAuthor?: (login: string) => boolean;
+  /** Called for every comment skipped because of `isAllowedAuthor`. */
+  onRejectedAuthor?: (login: string, commentId: number) => void;
 }
 
 /**
@@ -64,6 +75,8 @@ export class GitHubTransport implements Transport {
   private readonly onIdentityMismatch?: GitHubTransportOptions['onIdentityMismatch'];
   private readonly getEtag?: () => string | undefined;
   private readonly setEtag?: (etag: string | undefined) => void;
+  private readonly isAllowedAuthor?: GitHubTransportOptions['isAllowedAuthor'];
+  private readonly onRejectedAuthor?: GitHubTransportOptions['onRejectedAuthor'];
 
   constructor(options: GitHubTransportOptions) {
     const [owner, repoName] = options.repo.split('/');
@@ -78,6 +91,8 @@ export class GitHubTransport implements Transport {
     this.onIdentityMismatch = options.onIdentityMismatch;
     this.getEtag = options.getEtag;
     this.setEtag = options.setEtag;
+    this.isAllowedAuthor = options.isAllowedAuthor;
+    this.onRejectedAuthor = options.onRejectedAuthor;
   }
 
   private apiOptions(): GitHubFetchOptions {
@@ -188,6 +203,11 @@ export class GitHubTransport implements Transport {
   }): Envelope | null {
     const parsed = parseEnvelopeFromContent(comment.body);
     if (!parsed) return null;
+
+    if (this.isAllowedAuthor && !this.isAllowedAuthor(comment.user.login)) {
+      this.onRejectedAuthor?.(comment.user.login, comment.id);
+      return null;
+    }
 
     const declaredDev = parsed.from.dev;
     parsed.from.dev = comment.user.login;

@@ -132,6 +132,16 @@ export function hasExistingAnswer(log: Envelope[], askId: string): boolean {
 }
 
 export interface AutoAnswerDeps {
+  /**
+   * The authenticated dev this daemon/session is running as. The daemon
+   * already knows this (it's what `whoami()` resolved for the binding) and
+   * must pass it here explicitly — falling back to `config.identity?.dev` is
+   * only a safety net, because `ai-comms setup` never writes `identity` (v0.5
+   * identity comes from GitHub, not the config file), so that field is empty
+   * on every config `setup` produces and auto-answer would silently never
+   * fire.
+   */
+  dev?: string;
   logFn?: (project: string) => Envelope[];
   appendFn?: typeof appendEnvelope;
   sendFn?: (envelope: Envelope, project: string, config: ConfigV2) => Promise<void>;
@@ -143,6 +153,22 @@ export interface AutoAnswerDeps {
   isBudgetAvailableFn?: typeof isBudgetAvailable;
 }
 
+/**
+ * Envelope ids currently being answered.
+ *
+ * `appendEnvelope`'s dedupe closes the common re-ingest race (backfill
+ * overlapping a poll, a daemon restart), but nothing stopped two overlapping
+ * async calls for the very same envelope id from both passing every guard
+ * before either had launched an agent. This set is the actual mutual
+ * exclusion: reserved synchronously, before the first `await`, and released
+ * once the attempt (success or failure) is done.
+ */
+const inFlightAutoAnswers = new Set<string>();
+
+export function resetAutoAnswerInFlightForTests(): void {
+  inFlightAutoAnswers.clear();
+}
+
 export async function runAutoAnswer(
   envelope: Envelope,
   project: string,
@@ -150,13 +176,22 @@ export async function runAutoAnswer(
   logMessage: (message: string) => void,
   deps: AutoAnswerDeps = {},
 ): Promise<void> {
-  const dev = config.identity?.dev ?? '';
+  const dev = deps.dev || config.identity?.dev || '';
   const agent = config.agent ?? config.identity?.agent ?? 'claude-code';
   const projectConfig = config.projects[project];
   const autoAnswer = resolveAutoAnswer(projectConfig);
 
   const decision = shouldAutoAnswer(envelope, dev, autoAnswer.enabled);
-  if (!decision.trigger) return;
+  if (!decision.trigger) {
+    // A silent skip here is fine for "disabled" or "not for me" — but an
+    // empty identity means the daemon itself doesn't know who it's running
+    // as, which is a setup problem worth surfacing rather than looking like
+    // auto-answer quietly never applies to this ask.
+    if (!dev && autoAnswer.enabled && (envelope.type === 'ask' || envelope.type === 'need')) {
+      logMessage(`auto-answer skipped for ${envelope.id}: identity unknown`);
+    }
+    return;
+  }
 
   const logFn = deps.logFn ?? loadLog;
   const log = logFn(project);
@@ -186,6 +221,11 @@ export async function runAutoAnswer(
     return;
   }
 
+  if (inFlightAutoAnswers.has(envelope.id)) {
+    logMessage(`auto-answer skipped for ${envelope.id}: already being answered`);
+    return;
+  }
+
   const isBudgetAvailableFn = deps.isBudgetAvailableFn ?? isBudgetAvailable;
   if (
     !isBudgetAvailableFn(project, envelope.from.dev, autoAnswer.maxPerRequesterPerHour)
@@ -196,75 +236,86 @@ export async function runAutoAnswer(
     return;
   }
 
-  const agentSpec = buildReadOnlyAgentSpec(agent, buildAutoAnswerPrompt(envelope, log), repoPath);
-  if ('error' in agentSpec) {
-    logMessage(`auto-answer skipped for ${envelope.id}: ${agentSpec.error}`);
-    return;
-  }
+  // Reserve the in-flight slot and the budget slot now, synchronously and
+  // before the first `await` below. Everything above this point is
+  // synchronous, so two calls racing for the same requester cannot both read
+  // "budget available" before either records its use — the second call only
+  // runs after this one has already reserved.
+  inFlightAutoAnswers.add(envelope.id);
+  (deps.recordBudgetFn ?? recordBudgetUse)(project, envelope.from.dev);
 
-  logMessage(
-    `auto-answer launching for ${envelope.id} (${agentSpec.restriction}) in ${repoPath}`,
-  );
-
-  const runAgentFn =
-    deps.runAgentFn ??
-    ((spec, timeoutMs) => runHeadlessAgent(spec, { timeoutMs }));
-
-  let output: { stdout: string; exitCode: number | null };
   try {
-    output = await runAgentFn(agentSpec.launch, autoAnswer.timeoutSeconds * 1000);
-  } catch (err) {
-    logMessage(`auto-answer failed for ${envelope.id}: ${String(err)}`);
-    return;
-  }
+    const agentSpec = buildReadOnlyAgentSpec(agent, buildAutoAnswerPrompt(envelope, log), repoPath);
+    if ('error' in agentSpec) {
+      logMessage(`auto-answer skipped for ${envelope.id}: ${agentSpec.error}`);
+      return;
+    }
 
-  const text = output.stdout.trim();
-  if (!text || output.exitCode !== 0) {
     logMessage(
-      `auto-answer produced no answer for ${envelope.id}: exit=${output.exitCode ?? 'null'}`,
+      `auto-answer launching for ${envelope.id} (${agentSpec.restriction}) in ${repoPath}`,
     );
-    return;
-  }
 
-  // `repo` identifies a repo, so falling back to the dev's own name is
-  // meaningless. When repoPath spans several repos nothing matches, and naming
-  // the project is the honest answer.
-  const answerRepo =
-    projectConfig?.repos?.find((r) => r.path === repoPath)?.name ?? project;
+    const runAgentFn =
+      deps.runAgentFn ??
+      ((spec, timeoutMs) => runHeadlessAgent(spec, { timeoutMs }));
 
-  const answer = createEnvelope(
-    {
-      type: 'answer',
-      subject: `re: ${envelope.subject}`.slice(0, 120),
-      // Mark the cut: a silently truncated answer reads as a complete one, and
-      // the asker acts on half an answer without knowing the rest existed.
-      body: text.length > 4000 ? text.slice(0, 3985) + ' […cut]' : text,
-      to: [envelope.from.dev],
-      reply_to: envelope.id,
-    },
-    { dev, agent, repo: answerRepo },
-    { hops: envelope.hops + 1 },
-  );
+    let output: { stdout: string; exitCode: number | null };
+    try {
+      output = await runAgentFn(agentSpec.launch, autoAnswer.timeoutSeconds * 1000);
+    } catch (err) {
+      logMessage(`auto-answer failed for ${envelope.id}: ${String(err)}`);
+      return;
+    }
 
-  const sendFn =
-    deps.sendFn ??
-    (async (envelope, proj, cfg) => {
-      const repoPath = projectConfig?.repos?.[0]?.path ?? process.cwd();
-      const ctx = resolveContext(repoPath, cfg, { projectOverride: proj });
-      const transport = createTransport(ctx, cfg);
-      await transport.send(envelope);
-      for (const notifier of createNotifiers(ctx.notifiers, proj)) {
-        await notifier.notify(envelope);
-      }
-    });
-  const appendFn = deps.appendFn ?? appendEnvelope;
+    const text = output.stdout.trim();
+    if (!text || output.exitCode !== 0) {
+      logMessage(
+        `auto-answer produced no answer for ${envelope.id}: exit=${output.exitCode ?? 'null'}`,
+      );
+      return;
+    }
 
-  try {
-    await sendFn(answer, project, config);
-    appendFn(answer, project);
-    (deps.recordBudgetFn ?? recordBudgetUse)(project, envelope.from.dev);
-    logMessage(`auto-answer published ${answer.id} for ${envelope.id}`);
-  } catch (err) {
-    logMessage(`auto-answer publish failed for ${envelope.id}: ${String(err)}`);
+    // `repo` identifies a repo, so falling back to the dev's own name is
+    // meaningless. When repoPath spans several repos nothing matches, and naming
+    // the project is the honest answer.
+    const answerRepo =
+      projectConfig?.repos?.find((r) => r.path === repoPath)?.name ?? project;
+
+    const answer = createEnvelope(
+      {
+        type: 'answer',
+        subject: `re: ${envelope.subject}`.slice(0, 120),
+        // Mark the cut: a silently truncated answer reads as a complete one, and
+        // the asker acts on half an answer without knowing the rest existed.
+        body: text.length > 4000 ? text.slice(0, 3985) + ' […cut]' : text,
+        to: [envelope.from.dev],
+        reply_to: envelope.id,
+      },
+      { dev, agent, repo: answerRepo },
+      { hops: envelope.hops + 1 },
+    );
+
+    const sendFn =
+      deps.sendFn ??
+      (async (envelope, proj, cfg) => {
+        const repoPath = projectConfig?.repos?.[0]?.path ?? process.cwd();
+        const ctx = resolveContext(repoPath, cfg, { projectOverride: proj });
+        const transport = createTransport(ctx, cfg);
+        await transport.send(envelope);
+        for (const notifier of createNotifiers(ctx.notifiers, proj)) {
+          await notifier.notify(envelope);
+        }
+      });
+    const appendFn = deps.appendFn ?? appendEnvelope;
+
+    try {
+      await sendFn(answer, project, config);
+      appendFn(answer, project);
+      logMessage(`auto-answer published ${answer.id} for ${envelope.id}`);
+    } catch (err) {
+      logMessage(`auto-answer publish failed for ${envelope.id}: ${String(err)}`);
+    }
+  } finally {
+    inFlightAutoAnswers.delete(envelope.id);
   }
 }

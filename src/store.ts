@@ -4,9 +4,12 @@ import {
   mkdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import path from 'node:path';
 import {
+  getConfigDir,
   getProjectCursorPath,
   getProjectDaemonLogPath,
   getProjectDaemonPidPath,
@@ -58,16 +61,26 @@ function ensureProjectDir(project: string): void {
   mkdirSync(getProjectDir(project), { recursive: true });
 }
 
+/**
+ * Append an envelope to the project log, deduping by id.
+ *
+ * Returns whether it was actually appended (`false` for a duplicate). Callers
+ * that trigger side effects on ingest — auto-answer, desktop notifications —
+ * must only do so when this returns `true`: a re-ingest (backfill overlap, a
+ * daemon restart replaying the backlog, two polls racing) must not relaunch
+ * the answerer or notify a second time for a message already handled.
+ */
 export function appendEnvelope(
   envelope: Envelope,
   project: string,
   existing?: Envelope[],
-): void {
+): boolean {
   const logPath = getProjectLogPath(project);
   const known = existing ?? loadLog(project);
-  if (known.some((e) => e.id === envelope.id)) return;
+  if (known.some((e) => e.id === envelope.id)) return false;
   ensureProjectDir(project);
   appendFileSync(logPath, JSON.stringify(envelope) + '\n', 'utf8');
+  return true;
 }
 
 export function loadLog(project: string): Envelope[] {
@@ -166,15 +179,24 @@ export function materializeActiveClaims(
   envelopes: Envelope[],
   now = new Date(),
 ): ActiveClaim[] {
-  const released = new Set<string>();
-  const claims: ActiveClaim[] = [];
-
+  const claimsById = new Map<string, Envelope>();
   for (const env of envelopes) {
-    if (env.type === 'release' && env.reply_to) {
+    if (env.type === 'claim') claimsById.set(env.id, env);
+  }
+
+  // Identity is authenticated by the transport, so a release only counts when
+  // it comes from the same dev who made the claim — otherwise anyone on the
+  // bus could release anyone else's claim just by posting a `release`.
+  const released = new Set<string>();
+  for (const env of envelopes) {
+    if (env.type !== 'release' || !env.reply_to) continue;
+    const claim = claimsById.get(env.reply_to);
+    if (claim && claim.from.dev === env.from.dev) {
       released.add(env.reply_to);
     }
   }
 
+  const claims: ActiveClaim[] = [];
   for (const env of envelopes) {
     if (env.type !== 'claim') continue;
     if (released.has(env.id)) continue;
@@ -243,9 +265,18 @@ export function formatClaimConflict(conflict: ClaimConflict): string {
 }
 
 function releasesByClaimId(envelopes: Envelope[]): Map<string, Envelope> {
+  const claimsById = new Map<string, Envelope>();
+  for (const env of envelopes) {
+    if (env.type === 'claim') claimsById.set(env.id, env);
+  }
+
+  // Same rule as materializeActiveClaims: only the claim's own author can
+  // release it, so the inbox must not show someone else's release as valid.
   const map = new Map<string, Envelope>();
   for (const env of envelopes) {
-    if (env.type === 'release' && env.reply_to) {
+    if (env.type !== 'release' || !env.reply_to) continue;
+    const claim = claimsById.get(env.reply_to);
+    if (claim && claim.from.dev === env.from.dev) {
       map.set(env.reply_to, env);
     }
   }
@@ -310,4 +341,74 @@ export function isLogStale(
 
 export function isAnyDaemonRunning(projects: string[]): boolean {
   return projects.some((p) => isDaemonRunning(p));
+}
+
+export function getDaemonLockPath(): string {
+  return path.join(getConfigDir(), 'daemon.lock');
+}
+
+function readDaemonLockPid(): number | null {
+  const lockPath = getDaemonLockPath();
+  if (!existsSync(lockPath)) return null;
+  try {
+    const pid = Number.parseInt(readFileSync(lockPath, 'utf8').trim(), 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `pid` belongs to a live process.
+ *
+ * Signal 0 sends nothing — it only probes. ESRCH ("no such process") or a
+ * permission error both mean it is safe to treat the pid as gone; anything
+ * that does not throw means it is still alive.
+ */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type DaemonLockResult = { acquired: true } | { acquired: false; pid: number };
+
+/**
+ * Single-instance lock for the daemon.
+ *
+ * Two daemons watching the same bus — an autostarted one plus a manually run
+ * one, or a laptop and a desktop both online — each answer the same question,
+ * doubling every auto-answer. The lock file holds the owning pid: a stale one
+ * (its process no longer alive) is taken over rather than treated as a
+ * conflict, so a daemon that crashed or was killed -9 doesn't permanently
+ * block a new one from starting.
+ */
+export function acquireDaemonLock(
+  pid = process.pid,
+  isAliveFn: (pid: number) => boolean = isPidAlive,
+): DaemonLockResult {
+  mkdirSync(getConfigDir(), { recursive: true });
+  const existingPid = readDaemonLockPid();
+  if (existingPid != null && existingPid !== pid && isAliveFn(existingPid)) {
+    return { acquired: false, pid: existingPid };
+  }
+  writeFileSync(getDaemonLockPath(), String(pid) + '\n', 'utf8');
+  return { acquired: true };
+}
+
+/**
+ * Releases the lock, but only if it still names this pid — a lock already
+ * taken over by a newer daemon (because this one went stale) must not be
+ * deleted out from under that newer daemon on this one's shutdown.
+ */
+export function releaseDaemonLock(pid = process.pid): void {
+  if (readDaemonLockPid() !== pid) return;
+  try {
+    unlinkSync(getDaemonLockPath());
+  } catch {
+    // ignore
+  }
 }
