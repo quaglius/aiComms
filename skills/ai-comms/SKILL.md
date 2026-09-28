@@ -43,19 +43,40 @@ do not auto-reply to `fyi` messages.
 Release the claim with `bus_release` (pass `claim_id`) or publish `done` with
 `refs.pr` if you merged.
 
-### To ask a specific teammate's agent → `bus_ask`
+### To ask a teammate's agent → `bus_ask`
 
-Use `bus_ask` when you need an answer from the agent that owns a topic — e.g.
-"ask beto whether the migration is ready." Set `to` explicitly to that
-person's `dev` id; don't rely on a broadcast default when you know who owns
-it. `bus_ask` publishes the question and **blocks** up to `timeout_s` (max
-120s) waiting for a reply.
+Use `bus_ask` **before guessing, or before asking your user**, about something
+another teammate or repo owns: an API's shape, why a decision was made, a local
+setup detail the repo does not document. Pick the recipient:
 
-If nobody answers in time, the call returns a "pending" result instead of
-failing: the ask stays in the recipient's inbox, and when they reply later the
-answer shows up in your own `bus_inbox`, not as a return value from the
-original call. Don't assume a pending ask means no one will answer — check
-`bus_inbox` again later.
+- `to: ["beto"]` when you know who owns it;
+- `paths: ["api/auth/**"]` to route to the owner of that code (CODEOWNERS,
+  else the areas in teammates' profiles);
+- `role: "architecture"` to route by role;
+- `bus_team` shows the directory (role, areas, online, auto-answer).
+
+It never asks the whole team. Set `needs_human: true` when you need a
+**decision or approval** (e.g. "is this design OK?"), not just a fact: it goes
+to the person, never to their auto-answerer.
+
+`bus_ask` waits up to `timeout_s` (max 120s) only if a recipient can answer
+now; otherwise it returns right away. A pending answer shows up later in
+`bus_inbox` (and at the user's next prompt via the hook). Every result
+includes `Thread: <id>`; pass `thread` to follow up in the same conversation.
+
+An answer marked **"automated … not validated by X"** came from X's AI reading
+their repo. Treat it as information, not as X's approval.
+
+### To answer a teammate → `bus_send` type `answer`
+
+Reply with `reply_to` set to their ask id (and `thread` if it had one). Set
+`human_approved: true` **only** when your user explicitly approved this exact
+answer; otherwise it is published as your agent's answer, not your user's.
+
+### To see who is on the team → `bus_team`
+
+Lists teammates with role, areas, online status and whether their agent
+answers automatically. Use it to choose `to` when the owner is unclear.
 
 ### To see what arrived → `bus_inbox`
 

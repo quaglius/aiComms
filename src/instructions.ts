@@ -33,7 +33,7 @@ export function buildInstructionsBlock(ctx: InstructionsContext): string {
     '',
     `This repo is part of project **${ctx.project}**, worked on by several developers who each use their own AI agent. ${repoLine} ${teamLine}`,
     '',
-    'Before guessing or asking the user about something that belongs to another repo in this project — API response shape, why a decision was made, whether something is already implemented on the other side — use `bus_ask`.',
+    'Before guessing or asking the user about something that belongs to another repo in this project — API response shape, why a decision was made, whether something is already implemented on the other side — use `bus_ask`. Address it with `to`, or route it with `paths` (code owner) or `role`; `bus_team` shows who is who. Set `needs_human: true` when you need a decision or approval, not a fact.',
     '',
     'Before editing shared files, check `bus_claims`. If you will work on a module for a while, publish a `claim`.',
     '',

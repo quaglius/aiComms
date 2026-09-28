@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @quaglius/ai-comms@0.6.0 hook session-start",
+            "command": "npx -y @quaglius/ai-comms@0.7.0 hook session-start",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @quaglius/ai-comms@0.6.0 hook user-prompt",
+            "command": "npx -y @quaglius/ai-comms@0.7.0 hook user-prompt",
             "timeout": 10
           }
         ]

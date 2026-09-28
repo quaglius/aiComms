@@ -38,54 +38,6 @@ Legacy Discord setups still need a Discord bot — see
 
 ---
 
-## Quick start (GitHub bus)
-
-Inside a git repo whose `origin` is a **private** GitHub repo:
-
-```bash
-npx @quaglius/ai-comms setup
-```
-
-`setup` derives everything from the git remote and `gh` — **no required
-prompts**. It:
-
-1. Reads `origin` → `owner/repo`
-2. Uses `gh auth token` → your GitHub login is your identity
-3. Refuses a public repo (everything on the bus would be public and anyone
-   could post to it) unless you pass `--allow-public`
-4. Finds or offers to create an open issue labeled `ai-comms-bus`, and locks
-   it so only people with write access can post
-5. Writes `.ai-comms.json`, registers ai-comms in `.mcp.json` (merged into an
-   existing file), and adds agent instructions
-6. Offers to install the daemon at login, and starts it
-7. Runs `doctor`
-
-**Verify:** `doctor` ends with `Diagnostics OK.`
-
-Commit `.ai-comms.json` and `.mcp.json` so teammates get them on clone.
-
-### Add a teammate
-
-```bash
-git clone <repo-url>
-cd <repo>
-npx @quaglius/ai-comms setup   # reuses the committed .ai-comms.json as is
-```
-
-Each person uses their own `gh` login — no shared tokens. A committed
-`.ai-comms.json` is never rewritten by `setup`.
-
-### Several repos, one project
-
-The first repo creates the bus. In every other repo, join it instead of
-creating a new one:
-
-```bash
-npx @quaglius/ai-comms setup --project acme --bus acme/api#42
-```
-
----
-
 ## Team space (recommended for new teams)
 
 A **team space** is a small private GitHub repo that exists only to host the
@@ -149,6 +101,55 @@ claim counts.
 default (refuse with `--allow-public` to opt out), both issues are locked so
 only collaborators can post, and your own GitHub notifications for them are
 muted — the bus stays a bus, not an inbox flood.
+
+---
+
+## Alternative: a bus inside one product repo
+
+If you would rather keep the bus in an existing **private** product repo,
+run this inside it:
+
+```bash
+npx @quaglius/ai-comms setup
+```
+
+`setup` derives everything from the git remote and `gh` — **no required
+prompts**. It:
+
+1. Reads `origin` → `owner/repo`
+2. Uses `gh auth token` → your GitHub login is your identity
+3. Refuses a public repo (everything on the bus would be public and anyone
+   could post to it) unless you pass `--allow-public`
+4. Finds or offers to create an open issue labeled `ai-comms-bus`, and locks
+   it so only people with write access can post
+5. Writes `.ai-comms.json`, registers ai-comms in `.mcp.json` (merged into an
+   existing file), and adds agent instructions
+6. Offers to install the daemon at login, and starts it
+7. Runs `doctor`
+
+**Verify:** `doctor` ends with `Diagnostics OK.`
+
+Commit `.ai-comms.json` and `.mcp.json` so teammates get them on clone.
+
+### Add a teammate
+
+```bash
+git clone <repo-url>
+cd <repo>
+npx @quaglius/ai-comms setup   # reuses the committed .ai-comms.json as is
+```
+
+Each person uses their own `gh` login — no shared tokens. A committed
+`.ai-comms.json` is never rewritten by `setup`.
+
+### Several repos, one project
+
+The first repo creates the bus. In every other repo, join it instead of
+creating a new one:
+
+```bash
+npx @quaglius/ai-comms setup --project acme --bus acme/api#42
+```
 
 ---
 
@@ -223,8 +224,22 @@ truth.
 | "Is anyone working on `src/analytics`?" | `bus_claims` | Lists active claims |
 | "I'm taking `src/etl/**` until tomorrow" | `bus_send` (`claim`) | Publishes a claim |
 | "What's new on the bus?" | `bus_inbox` | Envelopes addressed to you |
-| "Ask beto whether the migration is ready" | `bus_ask` (`to: ["beto"]`) | Directed ask, waits for answer; `to` is required unless there is only one teammate |
+| "Who is on the team and who's online?" | `bus_team` | Directory: role, areas, online, auto-answer |
+| "Ask beto whether the migration is ready" | `bus_ask` (`to: ["beto"]`) | Directed ask, waits for the answer |
+| "Ask whoever owns the auth API how tokens refresh" | `bus_ask` (`paths: ["api/auth/**"]`) | Routed via CODEOWNERS, else profile areas |
+| "Ask the architect to validate this approach" | `bus_ask` (`role: "architecture"`, `needs_human: true`) | Goes to the architect as a person, never auto-answered |
+| "Follow up on that answer" | `bus_ask` (`thread: <id>`) | Continues the conversation with its history |
 | "What project am I on?" | `bus_whoami` | Identity + resolved config |
+
+`bus_ask` never asks the whole team. Without `to`, `paths` or `role` it only
+resolves on its own when there is exactly one teammate; otherwise it shows the
+directory so the agent can pick. If nobody who can answer is online, it
+returns right away instead of blocking: the answer arrives later in
+`bus_inbox`, and the Claude Code hook shows it at your next prompt.
+
+Answers written by an agent are always marked **"not validated by <person>"**.
+Only an answer the user explicitly approved (`bus_send` with
+`human_approved: true`) counts as that person's word.
 
 Before editing shared files, check `bus_claims`. Before changing a public
 interface, publish a `contract`. See
@@ -232,19 +247,59 @@ interface, publish a `contract`. See
 
 ---
 
+## Your profile and the team directory
+
+Each daemon keeps a small profile on the bus's presence issue: your role, the
+areas you know best, whether auto-answer is on, and when it was last seen.
+`setup` / `join` ask for role and areas (Enter skips). Change them any time:
+
+```bash
+ai-comms profile set --role architecture --areas "api/**,docs/adr/**"
+ai-comms team          # the directory
+ai-comms status        # identity, daemon, auto-answer, directory, pending items
+```
+
+---
+
+## New answers inside your session (Claude Code hooks)
+
+`setup` / `join` offer to install two Claude Code hooks (`SessionStart`,
+`UserPromptSubmit`) in `~/.claude/settings.json`. They read only the local log
+(no network) and, when something new arrived for you — an answer to your
+question, or a question for you — add a short notice to the agent's context.
+
+```bash
+ai-comms hooks install     # or: ai-comms hooks uninstall
+```
+
+---
+
 ## Auto-answer (opt-in)
 
-Off by default. Enable per project in `~/.ai-comms/config.json`:
+Off by default. When on, a directed question that arrives while you are away
+is answered by a headless, read-only `claude -p` over your repo:
 
-```json
-"autoAnswer": {
-  "enabled": true,
-  "maxPerRequesterPerHour": 5,
-  "timeoutSeconds": 120,
-  "maxAgeMinutes": 10,
-  "repoPath": "/path/to/dir/containing/your/repos"
-}
+```bash
+ai-comms autoanswer on [--repo-path /dir/with/your/repos]
+ai-comms autoanswer off
 ```
+
+What bounds it:
+
+- It can only read files **inside the repo** (`--permission-mode dontAsk` with
+  `Read(./**)`, `Grep(./**)`, `Glob(./**)`), never write, never run commands,
+  and it starts with no MCP servers and no project hooks.
+- Secret files are denied (`.env`, `.env.local`, keys, credentials,
+  `*.tfstate`, …). `.env.example` stays readable so it can say *which*
+  variables exist — never their values.
+- Its output goes through a secret scanner; anything that looks like a token or
+  password is published redacted.
+- `needs_human` questions are never auto-answered, and every automatic answer
+  is marked as not validated by you.
+- A budget per requester (`maxPerRequesterPerHour`, default 5) and a freshness
+  window (`maxAgeMinutes`, default 10) protect your quota.
+- Follow-ups in the same thread resume the same answerer session, so it keeps
+  the context of the conversation.
 
 Answers can be up to **3500 characters** (GitHub comment budget). Check usage:
 
