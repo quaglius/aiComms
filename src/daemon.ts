@@ -5,7 +5,7 @@ import { Client } from 'discord.js';
 import notifier from 'node-notifier';
 import type { ConfigV2, ProjectConfig } from './config.js';
 import { loadConfig, resolveAutoAnswer } from './config.js';
-import { runAutoAnswer, resolveAutoAnswerRepoPath } from './auto-answer.js';
+import { runAutoAnswer, canAutoAnswer } from './auto-answer.js';
 import { isReadOnlyAgentSupported } from './agent-cli.js';
 import type { Envelope } from './envelope.js';
 import type { Transport } from './transports/types.js';
@@ -253,29 +253,9 @@ export function diffGitHubBindings(previous: GitHubBinding[], next: GitHubBindin
  * answer would run from can't be resolved — in which case `bus_ask`'s
  * fail-fast (spec §2.3) would keep treating this dev as able to answer while
  * every attempt actually fails.
- *
- * TODO(integration): replace with `canAutoAnswer` from auto-answer.ts once
- * it lands (added in parallel — review finding #4).
  */
 export function advertisedAutoAnswer(config: ConfigV2, project: string): boolean {
-  const projectConfig: ProjectConfig | undefined = config.projects[project];
-  const autoAnswer = resolveAutoAnswer(projectConfig);
-  if (!autoAnswer.enabled) return false;
-
-  const agent = config.agent ?? config.identity?.agent ?? 'claude-code';
-  if (!isReadOnlyAgentSupported(agent)) return false;
-
-  const repoPath = resolveAutoAnswerRepoPath(projectConfig, autoAnswer.repoPath);
-  if (!repoPath) return false;
-
-  // An *explicit* repoPath is trusted at config-write time to be a real
-  // directory; a stale/typo'd one would otherwise keep advertising
-  // "can answer" forever while every attempt fails. A path inferred from the
-  // single registered repo doesn't need this check — it's what setup itself
-  // registered.
-  if (autoAnswer.repoPath && !existsSync(path.resolve(repoPath))) return false;
-
-  return true;
+  return canAutoAnswer(config, project).ok;
 }
 
 interface WhoamiCacheEntry {

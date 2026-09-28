@@ -495,8 +495,15 @@ describe('daemon — advertisedAutoAnswer (presence heartbeat flag)', () => {
     };
   }
 
-  it('is true when enabled, the agent supports read-only launch, and exactly one repo is registered', () => {
-    assert.equal(advertisedAutoAnswer(config(), 'acme'), true);
+  it('is true when enabled, the agent supports read-only launch, and exactly one repo is registered', async () => {
+    await withTempHome('ai-comms-advertised-one-repo-', async (home) => {
+      const repo = mkdtempSync(path.join(home, 'api-'));
+      assert.equal(advertisedAutoAnswer(config({ repos: [{ name: 'api', path: repo }] }), 'acme'), true);
+    });
+  });
+
+  it('is false when the only registered repo no longer exists', () => {
+    assert.equal(advertisedAutoAnswer(config(), 'acme'), false);
   });
 
   it('is false when autoAnswer is disabled', () => {
@@ -544,7 +551,7 @@ describe('daemon — advertisedAutoAnswer (presence heartbeat flag)', () => {
           maxPerRequesterPerHour: 5,
           timeoutSeconds: 120,
           maxAgeMinutes: 10,
-          repoPath: home,
+          repoPath: mkdtempSync(path.join(home, 'repos-')),
         },
       });
       assert.equal(advertisedAutoAnswer(cfg, 'acme'), true);

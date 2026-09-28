@@ -886,7 +886,9 @@ describe('daemon — sendPresenceHeartbeat', () => {
             // actually advertise autoAnswer: true below — an empty `repos`
             // has no path an auto-answer could run from, so it would (rightly)
             // advertise false regardless of `autoAnswer.enabled`.
-            repos: [{ name: 'api', path: home }],
+            // A real directory that is not the home itself: the answerer refuses
+            // to run with $HOME as its repo.
+            repos: [{ name: 'api', path: mkdtempSync(path.join(home, 'repo-')) }],
             autoAnswer: { enabled: true, maxPerRequesterPerHour: 5, timeoutSeconds: 120, maxAgeMinutes: 10 },
           },
         },
