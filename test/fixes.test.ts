@@ -67,10 +67,13 @@ describe('daemon persists own envelopes', () => {
 
   it('notifies for foreign envelopes', () => {
     withTempHome(() => {
+      const now = new Date();
+      const ts = now.toISOString();
+      const ttl = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
       const foreign = createEnvelope(
         { type: 'ask', subject: 'help', to: ['ana'] },
         { dev: 'beto', agent: 'cursor', repo: 'acme-api' },
-        { id: 'F1', ts: '2026-09-16T12:00:00Z', ttl: '2026-09-17T12:00:00Z' },
+        { id: 'F1', ts, ttl },
       );
 
       const { notified } = ingestEnvelope(foreign, 'acme', 'ana');

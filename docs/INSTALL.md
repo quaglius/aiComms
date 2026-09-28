@@ -44,10 +44,16 @@ the MCP, the skill, and the `/bus:claim`, `/bus:inbox`, `/bus:claims` commands.
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["-y", "@quaglius/ai-comms@0.5.0", "mcp"]
+      "args": ["-y", "@quaglius/ai-comms@0.5.1", "mcp"]
     }
   }
 }
+```
+
+For a user-wide install (available in every repo, not just this one):
+
+```bash
+claude mcp add --scope user ai-comms -- npx -y @quaglius/ai-comms mcp
 ```
 
 ---
@@ -73,15 +79,12 @@ Cursor also reads [`AGENTS.md`](../AGENTS.md) at the repo root.
 
 ## Codex (OpenAI)
 
-```json
-{
-  "mcpServers": {
-    "ai-comms": {
-      "command": "npx",
-      "args": ["@quaglius/ai-comms", "mcp"]
-    }
-  }
-}
+Codex uses TOML, not JSON. Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.ai-comms]
+command = "npx"
+args = ["-y", "@quaglius/ai-comms", "mcp"]
 ```
 
 Codex reads [`AGENTS.md`](../AGENTS.md) at the repo root.

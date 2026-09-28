@@ -19,7 +19,12 @@ import { DiscordTransport } from '../src/transports/discord.js';
 const ORIGINAL_ENV = { ...process.env };
 
 afterEach(() => {
-  process.env = { ...ORIGINAL_ENV };
+  for (const key of Object.keys(process.env)) {
+    if (!(key in ORIGINAL_ENV)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    process.env[key] = value;
+  }
   clearCollaboratorsCacheForTests();
   resetGitHubAuthForTests();
 });
@@ -154,6 +159,8 @@ describe('Discord notifier', () => {
 
 describe('legacy Discord config', () => {
   it('resolves context and sends via discord transport', async () => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
     const home = mkdtempSync(path.join(tmpdir(), 'ai-comms-v05-'));
     process.env.HOME = home;
     process.env.USERPROFILE = home;
@@ -214,6 +221,10 @@ describe('legacy Discord config', () => {
       await transport.send(envelope);
     } finally {
       globalThis.fetch = originalFetch;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
       rmSync(home, { recursive: true, force: true });
     }
   });

@@ -1,35 +1,14 @@
 {
   "name": "ai-comms",
-  "version": "1.0.0",
-  "description": "Team AI agent coordination channel over Discord",
-  "author": "quaglius",
+  "version": "0.5.1",
+  "description": "Team AI agent coordination channel over a GitHub issue (with optional legacy Discord notifications)",
+  "author": {
+    "name": "quaglius"
+  },
   "mcpServers": {
     "ai-comms": {
       "command": "npx",
-      "args": ["@quaglius/ai-comms", "mcp"]
+      "args": ["-y", "@quaglius/ai-comms@0.5.1", "mcp"]
     }
-  },
-  "skills": [
-    {
-      "name": "ai-comms",
-      "path": "skills/ai-comms/SKILL.md"
-    }
-  ],
-  "commands": [
-    {
-      "name": "bus:claim",
-      "description": "Publish a claim on the bus (reserve paths until until)",
-      "template": "Use bus_send with type claim. First check bus_claims for conflicts. Ask me which paths to reserve and until when."
-    },
-    {
-      "name": "bus:inbox",
-      "description": "Show the bus inbox",
-      "template": "Run bus_inbox with unread_only true and show me active envelopes addressed to me."
-    },
-    {
-      "name": "bus:claims",
-      "description": "List active team claims",
-      "template": "Run bus_claims and show me active claims with owner, repo, paths, and expiry."
-    }
-  ]
+  }
 }

@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "tsx --test test/**/*.test.ts"
+    "test": "node -e \"const{execFileSync}=require('child_process');const{readdirSync}=require('fs');const files=readdirSync('test').filter(f=>f.endsWith('.test.ts')).map(f=>'test/'+f);execFileSync(process.execPath,[require.resolve('tsx/cli'),'--test',...files],{stdio:'inherit'})\"",
+    "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
     "node": ">=20"
@@ -53,6 +54,7 @@
     "dist",
     "bin",
     "skills",
+    "commands",
     "docs",
     ".claude-plugin",
     "README.md",

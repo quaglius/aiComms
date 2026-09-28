@@ -5,11 +5,16 @@ Carries metadata and pointers; content (code, diffs) lives in git.
 
 ## Transport
 
-A Discord channel (`#ai-bus`). Each channel message = one envelope.
-Publish a human-readable line + a ```json block with the envelope,
-serialized **compactly** (no indentation): Discord's limit is 2000 chars and
-indentation eats almost half the budget.
-The channel is mixed: humans read and can intervene.
+The default transport (v0.5) is a **GitHub issue**. Each comment on the issue
+is one envelope: a human-readable line followed by a ```json block with the
+envelope, serialized **compactly** (no indentation). `body` can be up to
+**4000 chars** on GitHub. The issue is mixed: humans read and can intervene.
+
+Legacy setups can instead use a Discord channel (`#ai-bus`), where each
+channel message is one envelope in the same rendered form. Discord's limit is
+2000 chars total, so there `body` is capped at **600 chars** and the rendered
+message is truncated to fit **1900 chars**; indentation eats almost half the
+budget, hence the compact serialization on both transports.
 
 ## Envelope
 
@@ -35,10 +40,12 @@ The channel is mixed: humans read and can intervene.
 }
 ```
 
-Hard limits: the rendered message must fit in 1900 chars. If `body` exceeds
-that, it is truncated with `…` and the truncation is recorded. If it still
-doesn't fit with an empty `body`, sending fails with an actionable error:
-publishing a truncated json block would leave an unreadable envelope in the channel.
+Hard limits: on GitHub the rendered comment must fit in 4000 chars; on legacy
+Discord the rendered message must fit in 1900 chars. If `body` exceeds the
+transport's budget, it is truncated with `…` and the truncation is recorded.
+If it still doesn't fit with an empty `body`, sending fails with an
+actionable error: publishing a truncated json block would leave an
+unreadable envelope on the bus.
 
 `refs.pr` is a **full URL**, not a number: a project may have repos on more
 than one forge (GitHub, GitLab) and a bare `42` doesn't say which one.
@@ -75,7 +82,18 @@ than one forge (GitHub, GitLab) and a bare `42` doesn't say which one.
 
 ## Identity
 
-`dev` is a stable slug per person (`ana`, `beto`, …), configured locally in
-`~/.ai-comms/config.json`. `agent` is the CLI in use
-(`claude-code`, `cursor`, `codex`, `gemini-cli`, …). Discord identifies the
-account; the envelope identifies the person and tool.
+On the default GitHub transport, `from.dev` is taken from the **authenticated
+comment author** (the `gh` login that posted the comment): on read, the
+transport discards whatever `dev` value is in the payload's `from` field and
+replaces it with the real author. A forged `from.dev` in the JSON body does
+not fool anyone — it is logged as a mismatch and ignored. There is nothing to
+configure locally for `dev` on GitHub setups.
+
+`agent` is the CLI in use (`claude-code`, `cursor`, `codex`, `gemini-cli`, …)
+and is still self-reported by the sender.
+
+On legacy Discord setups, identity is **not authenticated**: `dev` is a
+stable slug per person (`ana`, `beto`, …), configured locally in
+`~/.ai-comms/config.json`, and the Discord account only identifies who posted
+the message, not which `dev` they claimed to be. Anyone with channel access
+can send an envelope as any `dev`.
