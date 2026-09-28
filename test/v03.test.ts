@@ -279,13 +279,18 @@ describe('unsupported agent CLI', () => {
     const spec = buildReadOnlyAgentSpec('claude-code', 'answer this', '/repo');
     assert.ok(!('error' in spec));
     if (!('error' in spec)) {
-      assert.deepEqual(spec.launch.args.slice(0, 11), [
+      // v0.7 review fix: `--setting-sources ""` (not `user`, which loaded
+      // `~/.claude/settings.json` — the user's own hooks and allow rules)
+      // plus `--tools "Read,Grep,Glob"` capping the built-in tool surface.
+      assert.deepEqual(spec.launch.args.slice(0, 13), [
         '-p',
         '--permission-mode',
         'dontAsk',
         '--strict-mcp-config',
         '--setting-sources',
-        'user',
+        '',
+        '--tools',
+        'Read,Grep,Glob',
         '--output-format',
         'json',
         '--allowedTools',
@@ -475,30 +480,66 @@ describe('auto-answer freshness window', () => {
   });
 });
 
+// v0.7 review fix: resolveAutoAnswerRepoPath now validates the resolved path
+// (src/auto-answer.ts — validateAnswerRepoPath) rather than handing back
+// whatever string was configured, so these fixtures use real directories —
+// under a temp HOME, never HOME itself — and assert on the {ok, path}
+// shape instead of a bare string.
 describe('auto-answer repo resolution', () => {
-  const oneRepo = { discord: { channelId: '1' }, repos: [{ name: 'acme-api', path: '/code/api' }] };
-  const threeRepos = {
-    discord: { channelId: '1' },
-    repos: [
-      { name: 'acme-api', path: '/code/api' },
-      { name: 'acme-web', path: '/code/web' },
-      { name: 'acme-jobs', path: '/code/jobs' },
-    ],
-  };
-
-  it('infers the path when the project has a single repo', () => {
-    assert.equal(resolveAutoAnswerRepoPath(oneRepo), '/code/api');
+  it('infers the path when the project has a single repo', async () => {
+    await withTempHome(async (home) => {
+      const api = path.join(home, 'code', 'api');
+      mkdirSync(api, { recursive: true });
+      const oneRepo = { discord: { channelId: '1' }, repos: [{ name: 'acme-api', path: api }] };
+      assert.deepEqual(resolveAutoAnswerRepoPath(oneRepo), { ok: true, path: api });
+    });
   });
 
-  it('refuses to guess across several repos', () => {
-    assert.equal(resolveAutoAnswerRepoPath(threeRepos), null);
+  it('refuses to guess across several repos, naming the repo count', async () => {
+    await withTempHome(async (home) => {
+      const threeRepos = {
+        discord: { channelId: '1' },
+        repos: [
+          { name: 'acme-api', path: path.join(home, 'code', 'api') },
+          { name: 'acme-web', path: path.join(home, 'code', 'web') },
+          { name: 'acme-jobs', path: path.join(home, 'code', 'jobs') },
+        ],
+      };
+      const result = resolveAutoAnswerRepoPath(threeRepos);
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.reason, /3 repos/);
+    });
   });
 
-  it('uses an explicit repoPath, which is how multi-repo projects work', () => {
-    assert.equal(resolveAutoAnswerRepoPath(threeRepos, '/code'), '/code');
+  it('refuses with zero registered repos, naming the --repo-path fix', async () => {
+    const result = resolveAutoAnswerRepoPath({ discord: { channelId: '1' }, repos: [] });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /ai-comms autoanswer on --repo-path/);
   });
 
-  it('lets an explicit repoPath win over a single inferred repo', () => {
-    assert.equal(resolveAutoAnswerRepoPath(oneRepo, '/elsewhere'), '/elsewhere');
+  it('uses an explicit repoPath, which is how multi-repo projects work', async () => {
+    await withTempHome(async (home) => {
+      const threeRepos = {
+        discord: { channelId: '1' },
+        repos: [
+          { name: 'acme-api', path: path.join(home, 'code', 'api') },
+          { name: 'acme-web', path: path.join(home, 'code', 'web') },
+        ],
+      };
+      const code = path.join(home, 'code');
+      mkdirSync(code, { recursive: true });
+      assert.deepEqual(resolveAutoAnswerRepoPath(threeRepos, code), { ok: true, path: code });
+    });
+  });
+
+  it('lets an explicit repoPath win over a single inferred repo', async () => {
+    await withTempHome(async (home) => {
+      const api = path.join(home, 'code', 'api');
+      mkdirSync(api, { recursive: true });
+      const elsewhere = path.join(home, 'elsewhere');
+      mkdirSync(elsewhere, { recursive: true });
+      const oneRepo = { discord: { channelId: '1' }, repos: [{ name: 'acme-api', path: api }] };
+      assert.deepEqual(resolveAutoAnswerRepoPath(oneRepo, elsewhere), { ok: true, path: elsewhere });
+    });
   });
 });

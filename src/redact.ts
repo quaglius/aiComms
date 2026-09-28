@@ -54,13 +54,34 @@ const SECRET_PATTERNS: SecretPattern[] = [
   },
   {
     name: 'secret-assignment',
-    // `(password|secret|token|api_key) [:=] <value>`, where <value> is either
-    // a quoted string of 8+ chars, or an unquoted run of 8+ "secret-shaped"
-    // characters *not* followed by `(` — the `(` exclusion is what keeps
-    // `const token = getToken()` from matching: the identifier right of `=`
-    // is a call, not a literal, and the SPEC's literal `\S{8,}` would
-    // otherwise flag it (`getToken()` is 10 non-space chars).
-    regex: /\b(password|secret|token|api_key)\b\s*[:=]\s*(?:(["'])(?:(?!\2).){8,}\2|[A-Za-z0-9_\-+/.]{8,}(?!\())/gi,
+    // A key *containing* one of the credential-shaped words — password/
+    // passwd/pwd/secret/token/api[_-]key/access[_-]key/private[_-]key/
+    // credential(s) — with any identifier characters before or after it
+    // (`DB_PASSWORD`, `STRIPE_SECRET`, `client_secret`, `AWS_SECRET_ACCESS_KEY`),
+    // optionally quoted (`"password"` in a JSON blob), followed by `:`/`=`
+    // and a value that is either a quoted string of 8+ chars or an unquoted
+    // run of 8+ "secret-shaped" characters *not* followed by `(` — the `(`
+    // exclusion is what keeps `const token = getToken()` from matching: the
+    // identifier right of `=` is a call, not a literal, and a plain `\S{8,}`
+    // would otherwise flag it (`getToken()` is 10 non-space chars). A bare
+    // type annotation like `password: string` and an interpolation like
+    // `token=${token}` also fail the value check (too short, or `$` isn't a
+    // "secret-shaped" character), so neither is redacted.
+    regex:
+      /["']?\b[A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_]*\b["']?\s*[:=]\s*(?:(["'])(?:(?!\1).){8,}\1|[A-Za-z0-9_\-+/.]{8,}(?!\())/gi,
+  },
+  {
+    name: 'aws-secret-access-key',
+    // An AWS secret access key is an unlabeled 40-char base64-ish string —
+    // unlike the access key id (`AKIA`/`ASIA` prefix) it has no recognizable
+    // shape of its own, so on its own it's indistinguishable from any other
+    // base64 blob. Flag one only when it appears within 40 characters after
+    // the standalone word "aws" or "secret" (case-insensitive) — a lookbehind,
+    // so the anchor word itself is left in place and only the value is
+    // redacted. This catches labeled forms the key-based pattern above misses
+    // when the label and the value aren't directly adjacent (free text
+    // between them, e.g. "AWS secret access key (rotate soon): <value>").
+    regex: /(?<=\b(?:aws|secret)\b[\s\S]{0,40}?)(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/=])/gi,
   },
 ];
 

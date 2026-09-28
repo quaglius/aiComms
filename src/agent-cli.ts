@@ -48,7 +48,11 @@ export type AgentSpecResult = ReadOnlyAgentSpec | UnsupportedAgent;
  * would make the answerer unable to tell a new teammate what env vars a
  * feature needs. Listing only the local/environment-specific variants keeps
  * those templates readable while still denying every file that could hold a
- * real value.
+ * real value. The list below covers every environment-shaped suffix teams
+ * actually use in the wild (uat/qa/ci/stage/preprod/integration/e2e) plus the
+ * backup shapes an editor or a `cp .env .env.bak` leaves lying around
+ * (bak/backup/old/save/docker), so none of them slip through as "not exactly
+ * one of the known-safe template names".
  *
  * SPEC v0.7 §4 verified these flags against the real `claude` 2.1.x CLI: with
  * `--permission-mode dontAsk` and `Read(./**\/)`, a read outside the cwd is
@@ -64,7 +68,20 @@ const SECRET_PATH_DENIES = [
   '.env.production',
   '.env.prod',
   '.env.staging',
+  '.env.stage',
+  '.env.preprod',
   '.env.test',
+  '.env.uat',
+  '.env.qa',
+  '.env.ci',
+  '.env.integration',
+  '.env.e2e',
+  '.env.bak',
+  '.env.backup',
+  '.env.old',
+  '.env.save',
+  '.env.docker',
+  '.env*.bak',
   '*.env',
   'secrets*',
   '*secret*',
@@ -131,13 +148,29 @@ export function buildReadOnlyAgentSpec(
 ): AgentSpecResult {
   switch (agent) {
     case 'claude-code': {
+      // `--setting-sources ""` (rather than `user`) keeps the answerer from
+      // loading `~/.claude/settings.json`: that file can carry ai-comms' own
+      // hooks (which would then consume the notice meant for the human) and
+      // permissive allow rules (`Bash(...)`, `WebFetch`, `additionalDirectories`)
+      // that apply under `--permission-mode dontAsk` and would widen exactly
+      // what this launch is trying to keep narrow. `--tools "Read,Grep,Glob"`
+      // then caps the built-in tool surface itself to the three read-only
+      // tools the answerer needs — with no settings loaded there is no other
+      // source (a project's own `.claude/settings.json` under
+      // `--strict-mcp-config`, MCP servers, etc.) that could hand it a tool
+      // outside that list. These flags were verified against the real
+      // `claude` CLI: auth still works (no settings file is needed for
+      // that), the answer still comes back, and `Read` still works inside
+      // the cwd.
       const args = [
         '-p',
         '--permission-mode',
         'dontAsk',
         '--strict-mcp-config',
         '--setting-sources',
-        'user',
+        '',
+        '--tools',
+        'Read,Grep,Glob',
         '--output-format',
         'json',
         '--allowedTools',
@@ -153,8 +186,8 @@ export function buildReadOnlyAgentSpec(
       return {
         launch: { command: 'claude', args, cwd, stdin: prompt },
         restriction:
-          `--permission-mode dontAsk --allowedTools Read(./**),Grep(./**),Glob(./**) ` +
-          `with ${SECRET_PATH_DENIES.length} secret path denies`,
+          `--permission-mode dontAsk --setting-sources "" --tools Read,Grep,Glob ` +
+          `--allowedTools Read(./**),Grep(./**),Glob(./**) with ${SECRET_PATH_DENIES.length} secret path denies`,
       };
     }
     case 'cursor':
@@ -182,6 +215,15 @@ export function buildReadOnlyAgentSpec(
  * answerer's `--resume` would continue the *user's* interactive session and
  * could quote it back onto the bus. A fresh answerer must start from nothing
  * but the repo.
+ *
+ * `AI_COMMS_ANSWERER=1` marks the child process as the headless answerer
+ * itself (as opposed to any interactive `claude` session the user's own
+ * hooks might otherwise fire under). ai-comms' own `SessionStart`/
+ * `UserPromptSubmit` hooks check for it and print nothing when it is set —
+ * this process has `--setting-sources ""`, so those hooks would not run for
+ * it anyway, but the flag also lets a hook installed some other way (a
+ * project's own `.claude/settings.json`, which `--strict-mcp-config` does
+ * not block) recognize it and stay quiet.
  */
 export function answererEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -189,6 +231,7 @@ export function answererEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_PID') continue;
     env[key] = value;
   }
+  env.AI_COMMS_ANSWERER = '1';
   return env;
 }
 

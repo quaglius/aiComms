@@ -1,3 +1,6 @@
+import { statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import type { ConfigV2, ProjectConfig } from './config.js';
 import { resolveAutoAnswer } from './config.js';
 import { createTransport } from './transports/index.js';
@@ -60,6 +63,65 @@ export function shouldAutoAnswer(
   return { trigger: true };
 }
 
+export interface ValidateAnswerRepoPathOptions {
+  /** Override for the user's home directory. Defaults to `os.homedir()` —
+   *  tests set `process.env.HOME` and rely on that default rather than
+   *  passing this explicitly. */
+  home?: string;
+}
+
+export type AnswerRepoPathResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: string };
+
+/**
+ * Whether `p` is safe to hand the read-only answerer as its cwd.
+ *
+ * `Read(./**\/)` etc. (`src/agent-cli.ts`) scope every allow/deny rule under
+ * the cwd, so the cwd itself *is* the sandbox boundary: a relative path like
+ * `.` resolves against whatever directory spawned the daemon (`$HOME` under
+ * systemd, `/` under launchd), silently widening "the repo" to the whole
+ * home directory or filesystem. This is the one gate every path the
+ * answerer might run from — explicit `autoAnswer.repoPath` or an inferred
+ * single repo — must pass through.
+ *
+ * A pure function of its arguments and the filesystem: no config, no
+ * project lookup. Exported so other call sites (e.g. the CLI's own
+ * `--repo-path` validation) can reuse the exact same checks.
+ */
+export function validateAnswerRepoPath(
+  p: string,
+  options: ValidateAnswerRepoPathOptions = {},
+): AnswerRepoPathResult {
+  if (!path.isAbsolute(p)) {
+    return { ok: false, reason: `repoPath "${p}" is not an absolute path` };
+  }
+  const resolved = path.resolve(p);
+
+  let stat;
+  try {
+    stat = statSync(resolved);
+  } catch {
+    return { ok: false, reason: `repoPath "${p}" does not exist` };
+  }
+  if (!stat.isDirectory()) {
+    return { ok: false, reason: `repoPath "${p}" is not a directory` };
+  }
+
+  const home = path.resolve(options.home ?? homedir());
+  if (resolved === home) {
+    return {
+      ok: false,
+      reason: `repoPath "${p}" is the user's home directory — point it at a repo checkout, not $HOME`,
+    };
+  }
+  if (resolved === path.parse(resolved).root) {
+    return { ok: false, reason: `repoPath "${p}" is a filesystem root` };
+  }
+
+  return { ok: true, path: resolved };
+}
+
 /**
  * Where the headless answerer runs.
  *
@@ -67,16 +129,68 @@ export function shouldAutoAnswer(
  * repos points it at the directory containing them, so the answerer can read
  * all of them. With a single registered repo we can infer it. Otherwise we
  * refuse rather than guess: answering from the wrong tree is worse than not
- * answering.
+ * answering. Either way, the resolved path is validated
+ * (`validateAnswerRepoPath`) before it's handed back: a relative, missing,
+ * home-directory or filesystem-root path is refused with a reason, not
+ * silently used as the answerer's cwd.
  */
 export function resolveAutoAnswerRepoPath(
   projectConfig: ProjectConfig | undefined,
   explicitPath?: string,
-): string | null {
-  if (explicitPath) return explicitPath;
+  options: ValidateAnswerRepoPathOptions = {},
+): AnswerRepoPathResult {
+  if (explicitPath) return validateAnswerRepoPath(explicitPath, options);
+
   const repos = projectConfig?.repos ?? [];
-  if (repos.length !== 1) return null;
-  return repos[0]!.path;
+  if (repos.length === 0) {
+    return {
+      ok: false,
+      reason: 'no repo registered for this project — set a repo path with ai-comms autoanswer on --repo-path <dir>',
+    };
+  }
+  if (repos.length > 1) {
+    return {
+      ok: false,
+      reason:
+        `this project has ${repos.length} repos — set autoAnswer.repoPath to the directory that ` +
+        'contains them (ai-comms autoanswer on --repo-path <dir>)',
+    };
+  }
+  return validateAnswerRepoPath(repos[0]!.path, options);
+}
+
+export interface CanAutoAnswerResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * The advertised counterpart to `runAutoAnswer`'s own guards: whether this
+ * project could actually auto-answer right now, combining every condition
+ * that would make `runAutoAnswer` refuse before ever launching an agent
+ * (disabled, unsupported agent, no usable repo path). Used to advertise the
+ * `autoAnswer` flag in the presence heartbeat (`src/daemon.ts`) — publishing
+ * `autoAnswer: true` when the project can't actually answer would make
+ * teammates route questions here and wait for an answer that never comes.
+ */
+export function canAutoAnswer(config: ConfigV2, project: string): CanAutoAnswerResult {
+  const projectConfig = config.projects[project];
+  const autoAnswer = resolveAutoAnswer(projectConfig);
+  if (!autoAnswer.enabled) {
+    return { ok: false, reason: 'autoAnswer disabled' };
+  }
+
+  const agent = config.agent ?? config.identity?.agent ?? 'claude-code';
+  if (!isReadOnlyAgentSupported(agent)) {
+    return { ok: false, reason: `unsupported agent "${agent}"` };
+  }
+
+  const repoPath = resolveAutoAnswerRepoPath(projectConfig, autoAnswer.repoPath);
+  if (!repoPath.ok) {
+    return { ok: false, reason: repoPath.reason };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -119,6 +233,35 @@ const THREAD_HISTORY_LIMIT = 10;
 const THREAD_HISTORY_BODY_MAX = 800;
 
 /**
+ * Whether `envelope` belongs to `thread`, either directly (`threadOf(envelope)
+ * === thread`) or by following its `reply_to` chain to an envelope that does.
+ *
+ * This second path matters because of v0.7 §1.1/§4: a first-turn agent
+ * answer omits `thread` entirely (it would just equal `reply_to`), so
+ * `threadOf` alone falls back to that answer's own id and no longer lines up
+ * with the ask's thread id. Its `reply_to` — the ask it answered — still
+ * does, so a reply-chain walk recovers it. `byId` is a lookup of the same
+ * `log` this is called from; the chain is followed at most `log.length`
+ * hops so a `reply_to` cycle (which should never happen, but this is
+ * untrusted third-party data) can't loop forever.
+ */
+function envelopeBelongsToThread(
+  envelope: Envelope,
+  thread: string,
+  byId: Map<string, Envelope>,
+): boolean {
+  let current: Envelope | undefined = envelope;
+  const seen = new Set<string>();
+  while (current) {
+    if (threadOf(current) === thread) return true;
+    if (!current.reply_to || seen.has(current.reply_to)) return false;
+    seen.add(current.reply_to);
+    current = byId.get(current.reply_to);
+  }
+  return false;
+}
+
+/**
  * The envelopes of this ask's thread already in the local log, oldest first,
  * excluding the ask itself, capped to the most recent `limit`.
  */
@@ -128,8 +271,9 @@ export function gatherThreadHistory(
   limit = THREAD_HISTORY_LIMIT,
 ): Envelope[] {
   const thread = threadOf(askEnvelope);
+  const byId = new Map(log.map((e) => [e.id, e]));
   return log
-    .filter((e) => e.id !== askEnvelope.id && threadOf(e) === thread)
+    .filter((e) => e.id !== askEnvelope.id && envelopeBelongsToThread(e, thread, byId))
     .slice()
     .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
     .slice(-limit);
@@ -266,14 +410,12 @@ export async function runAutoAnswer(
     return;
   }
 
-  const repoPath = resolveAutoAnswerRepoPath(projectConfig, autoAnswer.repoPath);
-  if (!repoPath) {
-    logMessage(
-      `auto-answer skipped for ${envelope.id}: this project has several repos — ` +
-        'set autoAnswer.repoPath to the directory that contains them',
-    );
+  const repoPathResult = resolveAutoAnswerRepoPath(projectConfig, autoAnswer.repoPath);
+  if (!repoPathResult.ok) {
+    logMessage(`auto-answer skipped for ${envelope.id}: ${repoPathResult.reason}`);
     return;
   }
+  const repoPath = repoPathResult.path;
 
   if (inFlightAutoAnswers.has(envelope.id)) {
     logMessage(`auto-answer skipped for ${envelope.id}: already being answered`);
@@ -396,11 +538,15 @@ export async function runAutoAnswer(
         body: body.length > 4000 ? body.slice(0, 3985) + ' […cut]' : body,
         to: [envelope.from.dev],
         reply_to: envelope.id,
-        thread,
-        // Nobody validated this — the auto-answerer never sets `human`. See
-        // docs/PROTOCOL.md and SPEC v0.7 §2.5: only `bus_send` from a live,
+        // `thread` is set only for a follow-up (`thread !== envelope.id`): on
+        // the first turn of a conversation `thread` equals the ask's own id,
+        // which `reply_to` (set above) already identifies — carrying it too
+        // would just be `thread === reply_to`, a v:2 envelope for no reason.
+        // `answered_by` is never set here: v0.7 §1.1 already treats an
+        // absent `answered_by` as `'agent'` (nobody validated it) — see
+        // docs/PROTOCOL.md and SPEC v0.7 §2.5. Only `bus_send` from a live,
         // human-approved session may publish `answered_by: 'human'`.
-        answered_by: 'agent',
+        ...(thread !== envelope.id ? { thread } : {}),
       },
       { dev, agent, repo: answerRepo },
       { hops: envelope.hops + 1 },

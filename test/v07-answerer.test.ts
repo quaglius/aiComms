@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -60,6 +60,11 @@ function iso(offsetMs = 0): string {
 const sampleFrom = { dev: 'ana', agent: 'claude-code', repo: 'acme' };
 
 function setupLikeConfig(home: string, autoAnswerOverrides: Partial<ConfigV2['projects'][string]['autoAnswer']> = {}): ConfigV2 {
+  // A repo checkout under `home`, not `home` itself: `resolveAutoAnswerRepoPath`
+  // (v0.7 review fix — src/auto-answer.ts) now refuses to run the answerer
+  // with its cwd at the user's home directory (SPEC v0.7 §4 hardening).
+  const repoPath = path.join(home, 'repo');
+  mkdirSync(repoPath, { recursive: true });
   return {
     version: 2,
     agent: 'claude-code',
@@ -67,7 +72,7 @@ function setupLikeConfig(home: string, autoAnswerOverrides: Partial<ConfigV2['pr
     projects: {
       acme: {
         bus: { kind: 'github', repo: 'acme/api', issue: 42 },
-        repos: [{ name: 'api', path: home }],
+        repos: [{ name: 'api', path: repoPath }],
         autoAnswer: {
           enabled: true,
           maxPerRequesterPerHour: 5,
@@ -257,8 +262,8 @@ describe('auto-answer: needs_human never triggers (SPEC v0.7 §2.5)', () => {
   });
 });
 
-describe('auto-answer: answer envelope carries thread + answered_by (SPEC v0.7 §2.5/2.6)', () => {
-  it('publishes answered_by: agent and thread: threadOf(ask)', async () => {
+describe('auto-answer: first-turn answer omits answered_by and thread (SPEC v0.7 §1.1/§2.5/§2.6, v0.7 review fix)', () => {
+  it('omits answered_by (absent means agent) and omits thread (reply_to already identifies the root)', async () => {
     await withTempHome(async (home) => {
       const config = setupLikeConfig(home);
       const ask = createEnvelope(
@@ -281,10 +286,14 @@ describe('auto-answer: answer envelope carries thread + answered_by (SPEC v0.7 �
       });
 
       assert.ok(sent);
-      const answer = sent as unknown as { answered_by: string; thread: string; body: string };
-      assert.equal(answer.answered_by, 'agent');
-      assert.equal(answer.thread, threadOf(ask));
-      assert.equal(answer.thread, 'ASKTHREAD1');
+      const answer = sent as unknown as { answered_by?: string; thread?: string; reply_to: string; body: string };
+      // Absent `answered_by` reads as 'agent' per SPEC v0.7 §1.1 — nobody validated it.
+      assert.equal('answered_by' in answer, false);
+      // threadOf(ask) === ask.id here (first turn): thread is redundant with
+      // reply_to and must be omitted so the answer stays a plain v:1 envelope.
+      assert.equal(threadOf(ask), 'ASKTHREAD1');
+      assert.equal('thread' in answer, false);
+      assert.equal(answer.reply_to, 'ASKTHREAD1');
     });
   });
 
@@ -825,6 +834,14 @@ describe('answerer environment', () => {
       CLAUDE_PID: '123',
       ANTHROPIC_API_KEY: 'kept-for-auth',
     });
-    assert.deepEqual(env, { PATH: '/usr/bin', HOME: '/home/ana', ANTHROPIC_API_KEY: 'kept-for-auth' });
+    // AI_COMMS_ANSWERER=1 marks the process as the headless answerer itself
+    // (v0.7 review fix — src/agent-cli.ts) so a hook can recognize it and
+    // print nothing, rather than consuming the notice meant for the human.
+    assert.deepEqual(env, {
+      PATH: '/usr/bin',
+      HOME: '/home/ana',
+      ANTHROPIC_API_KEY: 'kept-for-auth',
+      AI_COMMS_ANSWERER: '1',
+    });
   });
 });
