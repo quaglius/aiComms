@@ -86,6 +86,72 @@ npx @quaglius/ai-comms setup --project acme --bus acme/api#42
 
 ---
 
+## Team space (recommended for new teams)
+
+A **team space** is a small private GitHub repo that exists only to host the
+bus — no code, no tie to any one project repo. It works from anywhere (you do
+not need to be inside a git repo), because the ai-comms MCP server is
+registered at the user level and `ai-comms status`/the MCP resolve your
+default project on their own (spec §3.3).
+
+**Lead — create the space once:**
+
+```bash
+npx @quaglius/ai-comms space create myteam        # personal account
+npx @quaglius/ai-comms space create myteam --org acme   # under an org
+```
+
+This:
+
+1. Creates a **private** repo (`myteam`, or `acme/myteam` with `--org`) —
+   refuses to reuse a public one unless you pass `--allow-public`.
+2. Creates the `ai-comms-bus`/`ai-comms-presence` labels, finds-or-creates and
+   locks both issues, and mutes GitHub notifications for them.
+3. Registers the project locally (`~/.ai-comms/config.json`) and makes it
+   your default project if you don't have one yet.
+4. Registers the `ai-comms` MCP server for every assistant it detects
+   (Claude Code, Cursor, Codex, Gemini CLI), installs Claude Code hooks, and
+   offers to install the daemon — then runs `doctor`.
+5. Prints the exact `invite`/`join` commands for your team.
+
+**Lead — invite teammates:**
+
+```bash
+npx @quaglius/ai-comms invite ana beto --space <owner>/myteam
+```
+
+Each invitee must **accept the GitHub invitation** (check their email or
+https://github.com/<owner>/myteam/invitations) before `join` works for them.
+
+**Teammate — join:**
+
+```bash
+npx @quaglius/ai-comms join <owner>/myteam
+```
+
+This finds the bus/presence issues by label (erroring clearly if the repo
+isn't an ai-comms space, or if the invitation hasn't been accepted yet),
+registers the project, mutes notifications, asks the optional profile
+questions, registers the MCP server and hooks, offers the daemon, and runs
+`doctor`.
+
+**Anyone — check in:**
+
+```bash
+npx @quaglius/ai-comms status
+```
+
+Prints your GitHub identity, the resolved project/bus, whether the daemon is
+running, auto-answer state, the team directory, and your unread inbox/active
+claim counts.
+
+**Privacy guarantees**, same as `setup`: the space repo is private by
+default (refuse with `--allow-public` to opt out), both issues are locked so
+only collaborators can post, and your own GitHub notifications for them are
+muted — the bus stays a bus, not an inbox flood.
+
+---
+
 ## Connect your assistant (MCP)
 
 ```json

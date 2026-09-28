@@ -51,6 +51,7 @@ import { getRepoCollaborators } from './collaborators.js';
 import { runSetup, writeMcpConfig } from './setup.js';
 import { computeAutoAnswerConfig, installClaudeHooks, runHook, uninstallClaudeHooks } from './hook.js';
 import { fetchProfiles, renderDirectory } from './presence.js';
+import { createSpace, inviteToSpace, joinSpace, resolveSpaceRepo, runStatus } from './space.js';
 
 async function runInit(): Promise<void> {
   console.log('ai-comms initial setup (legacy Discord)\n');
@@ -155,7 +156,7 @@ async function runSecretSet(project: string): Promise<void> {
   console.log(`Token saved for "${project}" in ~/.ai-comms/secrets.json`);
 }
 
-async function runDoctor(projectOverride?: string): Promise<number> {
+export async function runDoctor(projectOverride?: string): Promise<number> {
   try {
     let config;
     try {
@@ -668,6 +669,81 @@ program
   .option('--project <p>', 'project')
   .action(async (opts: { project?: string }) => {
     await runTeam(opts.project);
+  });
+
+// --- SPEC-v0.7 §3.1: team space (space create / invite / join / status) ----
+
+const spaceCmd = program
+  .command('space')
+  .description('Manage an ai-comms team space (a private GitHub repo dedicated to the bus)');
+
+spaceCmd
+  .command('create <name>')
+  .description(
+    'Create a private space repo (or reuse one), its bus/presence issues, register it, and join it. ' +
+      '<name> is either "myspace" (uses your login or --org) or "owner/myspace".',
+  )
+  .option('--org <org>', 'Create the space under a GitHub organization instead of your personal account')
+  .option('--allow-public', 'Allow a public repo as the space (private is required by default)')
+  .action(async (name: string, opts: { org?: string; allowPublic?: boolean }) => {
+    try {
+      await createSpace(name, {
+        org: opts.org,
+        allowPublic: opts.allowPublic,
+        joinSteps: { runDoctorFn: (project) => runDoctor(project) },
+      });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('invite <logins...>')
+  .description('Invite GitHub logins as collaborators (push) on a team space')
+  .option('--space <owner/name>', 'Space to invite into (defaults to the current/default project\'s bus repo)')
+  .option('--team <org/slug>', 'Also grant a GitHub team push access to the space')
+  .action(async (logins: string[], opts: { space?: string; team?: string }) => {
+    const config = loadConfig();
+    const space = resolveSpaceRepo(opts.space, config);
+    const results = await inviteToSpace(logins, space, { team: opts.team });
+
+    for (const r of results) {
+      if (r.status === 'invited') console.log(`✓ ${r.login}: invited`);
+      else if (r.status === 'already-collaborator') console.log(`✓ ${r.login}: already a collaborator`);
+      else {
+        console.log(`⚠ ${r.login}: failed (${r.detail})`);
+        process.exitCode = 1;
+      }
+    }
+    console.log('\nInvitees must accept the GitHub invitation before "ai-comms join" will work for them.');
+  });
+
+program
+  .command('join <owner-repo>')
+  .description(
+    'Join an existing team space (<owner-repo> = "owner/name"): find its bus/presence issues, ' +
+      'register it, and set it up locally',
+  )
+  .option('--allow-public', 'Allow a public repo as the space (private is required by default)')
+  .action(async (ownerRepo: string, opts: { allowPublic?: boolean }) => {
+    try {
+      await joinSpace(ownerRepo, {
+        allowPublic: opts.allowPublic,
+        joinSteps: { runDoctorFn: (project) => runDoctor(project) },
+      });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('status')
+  .description('Identity, project/bus, daemon, auto-answer, team directory, and pending inbox/claims')
+  .option('--project <p>', 'project')
+  .action(async (opts: { project?: string }) => {
+    await runStatus({ project: opts.project });
   });
 
 program.parseAsync(process.argv).catch((err) => {

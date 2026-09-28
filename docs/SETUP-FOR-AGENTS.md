@@ -5,7 +5,82 @@ user. Follow the steps in order. Do not advance until you have verified the curr
 
 ---
 
-## v0.5 default: GitHub bus
+## v0.7 recommended path: team space (new teams)
+
+If the user is setting ai-comms up **for a team for the first time** — no bus
+repo exists yet, or the "bus repo" would otherwise just be whichever product
+repo happened to run `setup` first — use the **team space** flow instead of
+[Step 1](#step-1--prerequisites) below. A team space is a small, private
+GitHub repo whose only job is to host the bus: nothing ties it to any one
+product repo, so it works the same whether the team has one repo or twenty,
+and every step is scriptable (no required prompts beyond the two optional
+profile questions).
+
+**Prerequisites:** same three checks as [Step 1](#step-1--prerequisites)
+(`node --version` ≥ 20, `gh auth status` logged in). `git remote get-url
+origin` is **not** required — none of these commands need to run inside a
+git repo.
+
+1. **Lead creates the space:**
+
+   ```bash
+   npx @quaglius/ai-comms space create <name> [--org <org>]
+   ```
+
+   Verify: it prints `Created private space repo <owner>/<name>` (or
+   `Reusing existing space repo …` if one by that name already existed —
+   confirm with the user that reuse is what they wanted), ends with
+   `Diagnostics OK.` from the `doctor` run it triggers, and prints the exact
+   `invite`/`join` commands to hand to the team.
+
+2. **Lead invites teammates** (GitHub logins, not emails):
+
+   ```bash
+   npx @quaglius/ai-comms invite <login> [<login>...] --space <owner>/<name>
+   ```
+
+   Verify: each login is reported `invited` or `already a collaborator` —
+   any `failed` line needs the reason resolved (e.g. a typo'd login) before
+   moving on. Tell the user each invitee must **accept the GitHub
+   invitation** (they'll get an email, or see it at
+   `https://github.com/<owner>/<name>/invitations`) before `join` will work
+   for them.
+
+3. **Each teammate joins:**
+
+   ```bash
+   npx @quaglius/ai-comms join <owner>/<name>
+   ```
+
+   Verify: it finds the bus and presence issues, registers the project, and
+   ends with `Diagnostics OK.` from `doctor`. A `not found or you have not
+   accepted the invitation yet` error means step 2 isn't done yet for this
+   person — do not try to work around it (e.g. by creating a second space);
+   just wait for the invitation to be accepted.
+
+4. **Anyone verifies the whole thing is wired up:**
+
+   ```bash
+   npx @quaglius/ai-comms status
+   ```
+
+   Verify: it prints the person's GitHub identity, the resolved
+   project/bus, daemon state, and a **team directory** with at least the
+   people who have run `join` and started their daemon (presence is
+   published by the daemon — see [Step 4](#step-4--daemon)). Also verify the
+   `bus_team` MCP tool returns the same directory from inside the assistant.
+
+Configure MCP ([Step 3](#step-3--configure-mcp)) is already done for
+detected assistants by `space create`/`join` themselves — only do it by hand
+for an assistant that wasn't auto-detected. [Step 4](#step-4--daemon) and
+[Step 6](#step-6--end-to-end-verification) still apply as written.
+
+If the user instead wants the bus tied to a specific product repo they
+already have (the v0.5 default), use the per-repo flow below.
+
+---
+
+## v0.5 default: GitHub bus (per product repo)
 
 Most new setups use **GitHub as the bus** — no Discord bot, no shared token.
 Identity comes from `gh auth login`.
@@ -166,7 +241,11 @@ npx @quaglius/ai-comms doctor
 
 | Command | Usage |
 |---|---|
-| `setup` | Configure repo for GitHub bus (default) |
+| `space create <name>` | Create (or reuse) a team space and join it — recommended for new teams |
+| `invite <login...>` | Invite GitHub logins as collaborators on a space |
+| `join <owner/name>` | Join an existing team space |
+| `status` | Identity, project/bus, daemon, directory, unread/claims |
+| `setup` | Configure the current repo for GitHub bus (per-repo flow) |
 | `doctor` | Diagnostics |
 | `daemon` | Poll bus and update local log |
 | `mcp` | MCP stdio server |
