@@ -49,6 +49,7 @@ import { createTransport } from './transports/index.js';
 import { isDiscordBus, isGitHubBus } from './transports/types.js';
 import { getRepoCollaborators } from './collaborators.js';
 import { runSetup, writeMcpConfig } from './setup.js';
+import { computeAutoAnswerConfig, installClaudeHooks, runHook, uninstallClaudeHooks } from './hook.js';
 
 async function runInit(): Promise<void> {
   console.log('ai-comms initial setup (legacy Discord)\n');
@@ -458,6 +459,142 @@ program
   .option('--project <p>', 'project')
   .action(async (opts: { project?: string }) => {
     await runBudget(opts.project);
+  });
+
+// --- SPEC-v0.7 §2.7: hook / hooks install / hooks uninstall -----------------
+
+/**
+ * Claude Code hooks pipe a JSON payload on stdin and expect the process to
+ * exit promptly either way. We don't need that payload (the hook resolves
+ * everything itself from the local log and cwd), but an unread, unclosed
+ * stdin can leave the hook process hanging when stdin is a pipe rather than
+ * a TTY — so drain it, bounded by a short timeout in case it's never closed.
+ */
+function drainStdin(timeoutMs = 200): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    process.stdin.on('data', () => {});
+    process.stdin.once('end', finish);
+    process.stdin.once('error', finish);
+    process.stdin.resume();
+  });
+}
+
+program
+  .command('hook <kind>')
+  .description(
+    'Print unread bus activity for a Claude Code hook (kind: session-start|user-prompt). ' +
+      'Never fails the hook: always exits 0.',
+  )
+  .action(async (kind: string) => {
+    await drainStdin();
+    try {
+      if (kind === 'session-start' || kind === 'user-prompt') {
+        const output = runHook(kind, process.cwd());
+        if (output) console.log(output);
+      }
+    } catch {
+      // A hook must never break the user's prompt.
+    }
+    process.exitCode = 0;
+  });
+
+const hooksCmd = program
+  .command('hooks')
+  .description('Manage the local Claude Code hooks that surface new bus activity');
+
+hooksCmd
+  .command('install')
+  .description('Install SessionStart/UserPromptSubmit hooks into ~/.claude/settings.json (idempotent)')
+  .action(() => {
+    const result = installClaudeHooks();
+    if (result.failed) {
+      console.warn(`⚠ ${result.failed}`);
+      return;
+    }
+    for (const event of result.installed) {
+      console.log(`Installed ${event} hook in ${result.settingsPath}`);
+    }
+    for (const event of result.alreadyInstalled) {
+      console.log(`${event} hook already installed in ${result.settingsPath}`);
+    }
+    if (result.installed.length === 0 && result.alreadyInstalled.length === 0) {
+      console.log(`No hook events to install in ${result.settingsPath}`);
+    }
+  });
+
+hooksCmd
+  .command('uninstall')
+  .description('Remove ai-comms hooks from ~/.claude/settings.json, leaving everything else untouched')
+  .action(() => {
+    const result = uninstallClaudeHooks();
+    if (result.failed) {
+      console.warn(`⚠ ${result.failed}`);
+      return;
+    }
+    if (result.removed.length === 0) {
+      console.log(`No ai-comms hooks found in ${result.settingsPath}`);
+      return;
+    }
+    for (const event of result.removed) {
+      console.log(`Removed ${event} hook from ${result.settingsPath}`);
+    }
+  });
+
+// --- SPEC-v0.7 §3.1: autoanswer on|off --------------------------------------
+
+async function runAutoAnswerCommand(
+  state: 'on' | 'off',
+  options: { project?: string; repoPath?: string },
+): Promise<void> {
+  const config = loadConfig();
+  const ctx = resolveContext(process.cwd(), config, { projectOverride: options.project });
+  const project = ctx.project;
+
+  const prev = config.projects[project]?.autoAnswer;
+  const autoAnswer = computeAutoAnswerConfig(prev, state === 'on', options.repoPath);
+
+  config.projects[project] = { ...(config.projects[project] ?? {}), autoAnswer };
+  saveConfig(config);
+
+  console.log(`autoAnswer for "${project}": ${autoAnswer.enabled ? 'ON' : 'OFF'}`);
+  console.log(
+    `  max ${autoAnswer.maxPerRequesterPerHour}/requester/h, timeout ${autoAnswer.timeoutSeconds}s, ` +
+      `maxAge ${autoAnswer.maxAgeMinutes}m` +
+      (autoAnswer.repoPath ? `, repoPath=${autoAnswer.repoPath}` : ''),
+  );
+  console.log('\nNote: the daemon must be running for auto-answer to actually respond on the bus.');
+  if (!autoAnswer.repoPath) {
+    console.log(
+      'Note: a project with more than one registered repo needs --repo-path so the auto-answerer ' +
+        'knows which checkout to read from.',
+    );
+  }
+}
+
+program
+  .command('autoanswer <state>')
+  .description('Turn the auto-answerer on or off for a project (state: on|off)')
+  .option('--project <p>', 'project')
+  .option('--repo-path <dir>', 'repo checkout the auto-answerer should read from (required for multi-repo projects)')
+  .action(async (state: string, opts: { project?: string; repoPath?: string }) => {
+    if (state !== 'on' && state !== 'off') {
+      console.error('Usage: ai-comms autoanswer on|off [--project p] [--repo-path dir]');
+      process.exitCode = 1;
+      return;
+    }
+    await runAutoAnswerCommand(state, opts);
   });
 
 program.parseAsync(process.argv).catch((err) => {

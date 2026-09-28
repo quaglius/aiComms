@@ -53,6 +53,7 @@
   "files": [
     "dist",
     "bin",
+    "hooks",
     "skills",
     "commands",
     "docs",

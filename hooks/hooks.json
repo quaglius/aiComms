@@ -1,0 +1,27 @@
+{
+  "description": "Surfaces new ai-comms bus activity (answers to your questions, questions directed at you) at the start of a session and before each prompt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @quaglius/ai-comms@0.6.0 hook session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @quaglius/ai-comms@0.6.0 hook user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
