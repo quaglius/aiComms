@@ -18,6 +18,7 @@ import { loadLog } from './store.js';
 import { isDirectedTo, isExpired, threadOf, type Envelope } from './envelope.js';
 import { SECURITY_PREAMBLE } from './preamble.js';
 import { quoteShellArg, resolveCliInvocation } from './cli-path.js';
+import { validateAnswerRepoPath } from './repo-path.js';
 
 // --- Identity cache (SPEC-v0.7 §2.7) ----------------------------------------
 //
@@ -605,7 +606,7 @@ export function computeAutoAnswerConfig(
   // A freshly-passed `--repo-path` is resolved to an absolute path before
   // it's stored, whatever form the user typed it in (relative to cwd, `~`
   // left un-expanded by the shell, a trailing slash, ...) — see
-  // `resolveAutoAnswerRepoPath`, which the `autoanswer` command runs first to
+  // `resolveRepoPathOption`, which the `autoanswer` command runs first to
   // validate it (existence, directory-ness, not $HOME, not a filesystem
   // root) before ever reaching here. An already-stored `prev.repoPath` was
   // resolved the same way when it was set, so it's left as-is.
@@ -628,27 +629,10 @@ export class AutoAnswerConfigError extends Error {
  * auto-answerer would end up treating every repo on the machine as fair
  * game). Returns the absolute path to store.
  */
-export function resolveAutoAnswerRepoPath(repoPath: string): string {
-  const resolved = path.resolve(repoPath);
-
-  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
-    throw new AutoAnswerConfigError(
-      `--repo-path "${repoPath}" does not exist or is not a directory (resolved to ${resolved}).`,
-    );
+export function resolveRepoPathOption(repoPath: string): string {
+  const checked = validateAnswerRepoPath(path.resolve(repoPath));
+  if (!checked.ok) {
+    throw new AutoAnswerConfigError(`--repo-path: ${checked.reason}.`);
   }
-
-  const home = path.resolve(homedir());
-  if (resolved === home) {
-    throw new AutoAnswerConfigError(
-      `--repo-path must not be your home directory (${resolved}) — point it at the directory ` +
-        `containing the repo checkout(s) the auto-answerer should read from.`,
-    );
-  }
-
-  const root = path.parse(resolved).root;
-  if (resolved === root) {
-    throw new AutoAnswerConfigError(`--repo-path must not be a filesystem root (${resolved}).`);
-  }
-
-  return resolved;
+  return checked.path;
 }

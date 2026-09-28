@@ -54,7 +54,7 @@ import {
   computeAutoAnswerConfig,
   drainStdin,
   installClaudeHooks,
-  resolveAutoAnswerRepoPath,
+  resolveRepoPathOption,
   runHook,
   uninstallClaudeHooks,
 } from './hook.js';
@@ -605,9 +605,9 @@ async function runAutoAnswerCommand(
 
   // Validate/resolve --repo-path (existence, directory-ness, not $HOME, not
   // a filesystem root) before anything is persisted, whether we're turning
-  // auto-answer on or off — see resolveAutoAnswerRepoPath.
+  // auto-answer on or off — see resolveRepoPathOption.
   const resolvedRepoPath =
-    options.repoPath !== undefined ? resolveAutoAnswerRepoPath(options.repoPath) : undefined;
+    options.repoPath !== undefined ? resolveRepoPathOption(options.repoPath) : undefined;
 
   const prev = config.projects[project]?.autoAnswer;
 

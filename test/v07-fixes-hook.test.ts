@@ -43,7 +43,7 @@ import {
   computeAutoAnswerConfig,
   drainStdin,
   markNotified,
-  resolveAutoAnswerRepoPath,
+  resolveRepoPathOption,
   runHook,
 } from '../src/hook.js';
 import { createEnvelope, type Envelope } from '../src/envelope.js';
@@ -422,38 +422,38 @@ describe('drainStdin (finding 2)', () => {
   });
 });
 
-// --- finding 6: resolveAutoAnswerRepoPath / computeAutoAnswerConfig --------
+// --- finding 6: resolveRepoPathOption / computeAutoAnswerConfig --------
 
-describe('resolveAutoAnswerRepoPath (finding 6)', () => {
+describe('resolveRepoPathOption (finding 6)', () => {
   it('resolves a relative path to an absolute one that exists', async () => {
     await withTempHome('ai-comms-fix-repopath-ok-', async (home) => {
       const dir = path.join(home, 'checkouts');
       mkdirSync(dir, { recursive: true });
       process.chdir(home);
-      assert.equal(resolveAutoAnswerRepoPath('checkouts'), path.resolve(dir));
+      assert.equal(resolveRepoPathOption('checkouts'), path.resolve(dir));
     });
   });
 
   it('throws when the path does not exist', () => {
     const missing = path.join(tmpdir(), `ai-comms-fix-does-not-exist-${Date.now()}`);
-    assert.throws(() => resolveAutoAnswerRepoPath(missing), AutoAnswerConfigError);
+    assert.throws(() => resolveRepoPathOption(missing), AutoAnswerConfigError);
   });
 
   it('throws when the path exists but is a file, not a directory', async () => {
     await withTempHome('ai-comms-fix-repopath-file-', async (home) => {
       const file = path.join(home, 'not-a-dir');
       writeFileSync(file, 'x', 'utf8');
-      assert.throws(() => resolveAutoAnswerRepoPath(file), AutoAnswerConfigError);
+      assert.throws(() => resolveRepoPathOption(file), AutoAnswerConfigError);
     });
   });
 
   it('refuses the home directory', () => {
-    assert.throws(() => resolveAutoAnswerRepoPath(homedir()), /home directory/);
+    assert.throws(() => resolveRepoPathOption(homedir()), /home directory/);
   });
 
   it('refuses a filesystem root', () => {
     const root = path.parse(process.cwd()).root;
-    assert.throws(() => resolveAutoAnswerRepoPath(root), /filesystem root/);
+    assert.throws(() => resolveRepoPathOption(root), /filesystem root/);
   });
 });
 

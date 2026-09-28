@@ -55,14 +55,7 @@ import { loadCodeowners, type CodeownersRule } from './codeowners.js';
 import { fetchProfiles, renderDirectory, type MemberProfile } from './presence.js';
 
 import { SECURITY_PREAMBLE } from './preamble.js';
-import { rememberIdentity } from './hook.js';
-// TODO(integration): src/hook.ts is being edited in parallel to export
-// `markNotified(project, ids)` (so an answer we already show inline here
-// isn't re-announced by the SessionStart/UserPromptSubmit hook). It may not
-// exist yet on this branch, so we reach it through the namespace import and
-// call it defensively (see the `bus_ask` handler below) rather than a named
-// import, which would fail to build until that export lands.
-import * as hookModule from './hook.js';
+import { markNotified, rememberIdentity } from './hook.js';
 
 export { SECURITY_PREAMBLE };
 
@@ -765,13 +758,9 @@ export function createMcpServer(directory?: string): McpServer {
       }
 
       // SPEC-v0.7 §2.7: the reply is already shown inline below, so tell the
-      // hook not to re-announce it at the recipient's next prompt. Best
-      // effort only — see the TODO(integration) note on the hookModule
-      // import above.
+      // hook not to re-announce it at the asker's next prompt. Best effort.
       try {
-        (hookModule as { markNotified?: (project: string, ids: string[]) => void }).markNotified?.(ctx.project, [
-          result.envelope.id,
-        ]);
+        markNotified(ctx.project, [result.envelope.id]);
       } catch {
         // Never let a notification-bookkeeping failure hide the answer we already have.
       }
