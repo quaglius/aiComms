@@ -60,11 +60,22 @@ afterEach(() => {
 
 async function withTempHome<T>(prefix: string, fn: (home: string) => T | Promise<T>): Promise<T> {
   const home = mkdtempSync(path.join(tmpdir(), prefix));
+  const previousCwd = process.cwd();
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   try {
     return await fn(home);
   } finally {
+    // A test may have chdir'd into a subdirectory of `home` (e.g. to
+    // exercise CLI code that resolves paths off cwd). Windows refuses to
+    // delete a directory that is the process's current working directory
+    // (EBUSY), so always leave it before the recursive rmSync below.
+    try {
+      process.chdir(previousCwd);
+    } catch {
+      // previousCwd should always still exist, but never let this hide
+      // the real cleanup error below.
+    }
     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }

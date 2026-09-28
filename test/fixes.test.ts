@@ -21,6 +21,7 @@ const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 
 function withTempHome(fn: (home: string) => void): void {
   const home = mkdtempSync(path.join(tmpdir(), 'ai-comms-fixes-'));
+  const previousCwd = process.cwd();
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   try {
@@ -30,6 +31,15 @@ function withTempHome(fn: (home: string) => void): void {
     else delete process.env.HOME;
     if (ORIGINAL_USERPROFILE) process.env.USERPROFILE = ORIGINAL_USERPROFILE;
     else delete process.env.USERPROFILE;
+    // A test may have chdir'd into a subdirectory of `home`; Windows
+    // refuses to delete the process's current working directory (EBUSY),
+    // so always leave it before the recursive rmSync below.
+    try {
+      process.chdir(previousCwd);
+    } catch {
+      // previousCwd should always still exist; never hide the real
+      // cleanup error below.
+    }
     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
