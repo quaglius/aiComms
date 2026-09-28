@@ -13,6 +13,23 @@ Reproduje con scripts los defectos que parecían graves. Validé el plugin con
 oficial de la API de GitHub (`github/rest-api-description`). Cada afirmación
 marcada como **verificado** tiene su reproducción en el apéndice.
 
+> **Estado (v0.7.0, en `main`).** Todo lo de este análisis quedó implementado,
+> salvo lo que se marca como pendiente abajo. El diseño de las fases 1–3 está en
+> [`SPEC-v0.7.md`](SPEC-v0.7.md).
+>
+> | Hallazgo | Estado |
+> |---|---|
+> | B1 npm desactualizado | CI + workflow de publicación listos. **Pendiente:** publicar (secret `NPM_TOKEN` + tag `v0.7.0`, o `npm publish`). |
+> | B2–B5, D1–D17 | Resueltos en v0.6 (Fase 0), con tests. |
+> | G1 a quién preguntar | Perfiles en un issue de presencia, `bus_team`, ruteo por `paths` (CODEOWNERS/áreas) y `role`. |
+> | G2 presencia y vuelta asíncrona | Latido del daemon, fail-fast en `bus_ask`, hooks de Claude Code, instrucciones del servidor MCP con el directorio. |
+> | G3 hechos vs. decisiones | `needs_human`; toda respuesta de IA se marca "no validada"; sólo `human_approved` la hace de la persona. |
+> | G4 hilos | `thread` en el sobre; el respondedor ve el hilo y retoma su sesión (`--resume`). |
+> | G5 config local | `.env.example` legible, respuestas con nombres y fuentes (nunca valores), escáner de secretos en la salida. |
+> | G6 respondedor | Sólo Read/Grep/Glob dentro del repo, sin configuración ni hooks del usuario, sin MCP, aislado de la sesión de Claude Code que lo lanzó. Verificado contra el `claude` real. |
+> | Espacio de equipo (§6) | `space create`, `invite`, `join`, `status`; MCP registrado a nivel usuario para Claude Code, Cursor, Codex y Gemini. |
+> | Paso B (un issue por hilo) | **Pendiente.** Se mantiene el bus de un solo issue; la presencia usa un segundo issue. |
+
 ---
 
 ## 1. Veredicto
