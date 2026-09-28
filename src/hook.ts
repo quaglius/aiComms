@@ -1,14 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { getConfigDir, getProjectDir } from './paths.js';
 import { loadConfig, type ConfigV2, type AutoAnswerConfig } from './config.js';
 import { resolveContext } from './context.js';
 import { loadLog } from './store.js';
-import { isDirectedTo, isExpired, type Envelope } from './envelope.js';
-import { SECURITY_PREAMBLE } from './mcp.js';
-import { PACKAGE_VERSION } from './version.js';
+import { isDirectedTo, isExpired, threadOf, type Envelope } from './envelope.js';
+import { SECURITY_PREAMBLE } from './preamble.js';
+import { quoteShellArg, resolveCliInvocation } from './cli-path.js';
 
 // --- Identity cache (SPEC-v0.7 §2.7) ----------------------------------------
 //
@@ -101,33 +100,16 @@ function saveHookState(project: string, state: HookState): void {
 
 // --- Formatting ---------------------------------------------------------
 
-/**
- * `envelope.thread` / `envelope.answered_by` are new in SPEC-v0.7 §1.1
- * (src/envelope.ts), which is out of this module's scope and has not added
- * them to the `Envelope` type yet in this worktree. This local extension —
- * and the `threadOf` fallback below, which mirrors the spec's
- * `threadOf(envelope) = envelope.thread ?? envelope.id` — should be deleted
- * and replaced with the real import once envelope.ts gains those fields.
- */
-type EnvelopeV2 = Envelope & {
-  thread?: string | null;
-  answered_by?: 'agent' | 'human';
-};
-
-/** @see EnvelopeV2 */
-export function threadOf(envelope: Envelope): string {
-  return (envelope as EnvelopeV2).thread ?? envelope.id;
-}
+export { threadOf };
 
 const NOTIFIED_TYPES = new Set(['answer', 'ask', 'need']);
 
 export function formatNoticeLine(envelope: Envelope): string {
-  const v2 = envelope as EnvelopeV2;
   const subject = envelope.subject || '(no subject)';
   let line = `- [${envelope.type}] ${envelope.from.dev} → re: ${subject} (id ${envelope.id}, thread ${threadOf(envelope)})`;
   // SPEC-v0.7 §2.5: an answer without `answered_by` is shown as unvalidated —
   // nobody confirmed a human approved it.
-  if (envelope.type === 'answer' && v2.answered_by !== 'human') {
+  if (envelope.type === 'answer' && envelope.answered_by !== 'human') {
     line += ' (automated, not validated)';
   }
   return line;
@@ -239,31 +221,6 @@ interface ClaudeHookGroup {
 interface ClaudeSettings {
   hooks?: Partial<Record<string, ClaudeHookGroup[]>>;
   [key: string]: unknown;
-}
-
-/**
- * Absolute node + absolute CLI script, falling back to an absolute `npx`
- * when running from an npx cache. Copied from `resolveDaemonCommand` in
- * src/setup.ts (adapted to not append a subcommand — callers append
- * `hook <kind>` themselves) because this module's scope is not allowed to
- * edit or import from setup.ts. Dedupe the two at integration.
- */
-function resolveCliInvocation(): { command: string; args: string[] } {
-  const nodeExec = process.execPath;
-  const binPath = fileURLToPath(new URL('../bin/ai-comms.js', import.meta.url));
-
-  if (!binPath.includes('_npx')) {
-    return { command: nodeExec, args: [binPath] };
-  }
-
-  const npxName = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const npxPath = path.join(path.dirname(nodeExec), npxName);
-  return { command: npxPath, args: ['-y', `@quaglius/ai-comms@${PACKAGE_VERSION}`] };
-}
-
-/** Copied from `quoteShellArg` in src/setup.ts — see resolveCliInvocation. */
-function quoteShellArg(arg: string): string {
-  return /\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
 }
 
 function buildHookCommand(

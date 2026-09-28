@@ -17,7 +17,9 @@ import {
   saveCursor,
   writeDaemonPid,
   removeDaemonPid,
+  compactLog,
 } from './store.js';
+import { rememberIdentity } from './hook.js';
 import { getConfigDir, getProjectDir } from './paths.js';
 import { createTransport } from './transports/index.js';
 import { isDiscordBus, type GitHubBusConfig } from './transports/types.js';
@@ -30,6 +32,7 @@ import { filePresenceCommentIdCache, upsertOwnProfile } from './presence.js';
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const GITHUB_POLL_MS = 15_000;
+const LOG_COMPACT_MS = 24 * 60 * 60 * 1000;
 /** How often we refresh our own presence profile (spec §2.1: "cada 5
  *  minutos por proyecto"). Editing a comment never notifies, so there's no
  *  cost to doing this more often than someone is likely to check it. */
@@ -102,10 +105,12 @@ const NOTIFICATION_ICON = (() => {
 })();
 
 function notifyEnvelope(envelope: Envelope, dev: string): void {
+  // A question that waits on this person — directed, or explicitly asking for
+  // a human decision — is the one notification worth a sound.
   const sound =
     (envelope.type === 'need' || envelope.type === 'ask') &&
     envelope.to.includes(dev) &&
-    !envelope.to.includes('*');
+    (!envelope.to.includes('*') || envelope.needs_human === true);
 
   const title = `ai-comms · ${envelope.type} · ${envelope.from.dev}/${envelope.from.agent}`;
   const message = envelope.subject;
@@ -238,6 +243,9 @@ export async function resolveDev(
   try {
     const dev = (await transport.whoami()).dev;
     whoamiCache.set(binding.project, { dev, fetchedAt: now });
+    // The Claude Code hook runs on every prompt and must not touch the
+    // network, so it reads the login we last authenticated as.
+    rememberIdentity(dev);
     return dev;
   } catch (err) {
     daemonLog(binding.project, `whoami failed: ${String(err)}`, verbose);
@@ -547,6 +555,21 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
     pollTimers.push(timer);
   }
 
+  // The log is append-only; without compaction it grows forever and every
+  // reader pays for it. Compact at start and once a day.
+  const compact = () => {
+    for (const project of projects) {
+      try {
+        const { kept, removed } = compactLog(project);
+        if (removed > 0) daemonLog(project, `log compacted: kept ${kept}, removed ${removed}`, verbose);
+      } catch (err) {
+        daemonLog(project, `log compaction failed: ${String(err)}`, verbose);
+      }
+    }
+  };
+  compact();
+  const compactTimer = setInterval(compact, LOG_COMPACT_MS);
+
   const presenceTimers: NodeJS.Timeout[] = [];
   for (const binding of githubBindings) {
     if (binding.bus.presence === undefined) continue;
@@ -564,6 +587,7 @@ async function runDaemonLocked(verbose: boolean): Promise<void> {
     for (const timer of presenceTimers) {
       clearInterval(timer);
     }
+    clearInterval(compactTimer);
     for (const project of projects) {
       removeDaemonPid(project);
     }

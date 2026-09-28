@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { homedir, platform } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { getGitRemote } from './git-remote.js';
 import { getGitHubToken } from './github-auth.js';
 import { githubFetch } from './transports/github-api.js';
@@ -11,6 +10,9 @@ import { loadConfig, saveConfig, type ConfigV2 } from './config.js';
 import { loadRepoComms, type RepoComms } from './context.js';
 import { buildInstructionsBlock, writeInstructionsToRepo } from './instructions.js';
 import { PACKAGE_VERSION } from './version.js';
+import { quoteShellArg, resolveCliInvocation } from './cli-path.js';
+import { installClaudeHooks } from './hook.js';
+import { muteIssue } from './github-subscription.js';
 import { prompt } from './prompt.js';
 
 const BUS_LABEL = 'ai-comms-bus';
@@ -388,24 +390,14 @@ function defaultExecFn(command: string, args: string[]): void {
  * pointing at a file that no longer exists.
  */
 function resolveDaemonCommand(): { command: string; args: string[] } {
-  const nodeExec = process.execPath;
-  const binPath = fileURLToPath(new URL('../bin/ai-comms.js', import.meta.url));
-
-  if (!binPath.includes('_npx')) {
-    return { command: nodeExec, args: [binPath, 'daemon'] };
+  const { command, args, fromNpxCache } = resolveCliInvocation();
+  if (fromNpxCache) {
+    console.log(
+      'Tip: the CLI is running from an npx cache, which npm can purge at any time. ' +
+        '`npm i -g @quaglius/ai-comms` is a more robust way to keep the daemon running.',
+    );
   }
-
-  console.log(
-    'Tip: the CLI is running from an npx cache, which npm can purge at any time. ' +
-      '`npm i -g @quaglius/ai-comms` is a more robust way to keep the daemon running.',
-  );
-  const npxName = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const npxPath = path.join(path.dirname(nodeExec), npxName);
-  return { command: npxPath, args: ['-y', `@quaglius/ai-comms@${PACKAGE_VERSION}`, 'daemon'] };
-}
-
-function quoteShellArg(arg: string): string {
-  return /\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
+  return { command, args: [...args, 'daemon'] };
 }
 
 function xmlEscape(s: string): string {
@@ -842,6 +834,38 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   }
 
   if (!options.skipDaemonOffer) {
+    // Every teammate who posts on the bus issue is subscribed to it, so each
+    // envelope would become a GitHub notification. The agents read the bus;
+    // people don't need an email per message.
+    for (const n of [issue, presence].filter((x): x is number => x !== undefined)) {
+      const muted = await muteIssue(busFullName, n);
+      console.log(muted.ok ? `Muted GitHub notifications for ${busFullName}#${n}` : `⚠ ${muted.detail}`);
+    }
+
+    if (agent === 'claude-code') {
+      try {
+        const answer = await prompt(
+          'Install Claude Code hooks so your agent sees new answers and questions at each prompt? [Y/n]',
+          'Y',
+        );
+        if (answer.toLowerCase() !== 'n') {
+          const outcome = installClaudeHooks();
+          if (outcome.failed) {
+            console.warn(`⚠ ${outcome.settingsPath}: ${outcome.failed}. Run "ai-comms hooks install" after fixing it.`);
+          } else if (outcome.installed.length > 0) {
+            console.log(`Installed Claude Code hooks (${outcome.installed.join(', ')}) in ${outcome.settingsPath}`);
+          } else {
+            console.log(`Claude Code hooks already installed in ${outcome.settingsPath}`);
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `⚠ Could not install Claude Code hooks (${err instanceof Error ? err.message : String(err)}). ` +
+            'Run "ai-comms hooks install" later.',
+        );
+      }
+    }
+
     try {
       await offerDaemonInstall();
     } catch (err) {
