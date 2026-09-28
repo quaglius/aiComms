@@ -813,3 +813,18 @@ describe('store: answer-sessions.json (SPEC v0.7 §4)', () => {
     });
   });
 });
+
+describe('answerer environment', () => {
+  it('drops the variables that would attach the answerer to a live Claude Code session', () => {
+    const env = answererEnv({
+      PATH: '/usr/bin',
+      HOME: '/home/ana',
+      CLAUDECODE: '1',
+      CLAUDE_CODE_SESSION_ID: 'the-users-session',
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      CLAUDE_PID: '123',
+      ANTHROPIC_API_KEY: 'kept-for-auth',
+    });
+    assert.deepEqual(env, { PATH: '/usr/bin', HOME: '/home/ana', ANTHROPIC_API_KEY: 'kept-for-auth' });
+  });
+});
