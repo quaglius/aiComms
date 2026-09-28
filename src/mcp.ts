@@ -470,7 +470,11 @@ export function createMcpServer(): McpServer {
             etag = value;
           },
         });
-        const initialCursor = formatCursor(envelope.ts, Number(sendResult.id));
+        // The comment id makes the cursor exclusive; the timestamp only narrows
+        // the query. Backdate it so a local clock running ahead of GitHub's
+        // cannot filter out the reply.
+        const since = new Date(Date.parse(envelope.ts) - 5 * 60_000).toISOString();
+        const initialCursor = formatCursor(since, Number(sendResult.id));
         fetchRemote = createGitHubAskFetcher(pollTransport, initialCursor);
         pollMs = BUS_ASK_GITHUB_POLL_MS;
       }
@@ -479,6 +483,7 @@ export function createMcpServer(): McpServer {
       const result = await waitForBusAskReply(ctx.project, envelope.id, timeoutMs, {
         fetchRemote,
         pollMs,
+        acceptReplyFrom: recipients,
       });
 
       const warningsText =

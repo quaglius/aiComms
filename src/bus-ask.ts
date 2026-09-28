@@ -167,10 +167,15 @@ export async function waitForBusAskReply(
     /**
      * Optional direct poll of the transport (GitHub only), so a reply that
      * has landed on the bus is seen even when no daemon is running to write
-     * it into the local log. Any envelopes it returns are appended to the
-     * local log with `appendEnvelope` before we look for the reply again.
+     * it into the local log. Only the reply itself is appended to the local log.
      */
     fetchRemote?: () => Promise<Envelope[]>;
+    /**
+     * Authors whose remote replies are accepted — the ask's recipients. The
+     * daemon filters inbound authors against the collaborators list; this
+     * direct poll does not, so it only trusts the people it actually asked.
+     */
+    acceptReplyFrom?: string[];
   } = {},
 ): Promise<{ kind: 'reply'; envelope: Envelope } | { kind: 'pending' }> {
   const pollMs = options.pollMs ?? BUS_ASK_POLL_MS;
@@ -187,13 +192,17 @@ export async function waitForBusAskReply(
 
     if (fetchRemote) {
       try {
-        const remoteEnvelopes = await fetchRemote();
-        for (const envelope of remoteEnvelopes) {
-          appendEnvelope(envelope, project);
-        }
-        if (remoteEnvelopes.length > 0) {
-          const remoteReply = findReplyToAsk(loadLogFn(project), askId);
-          if (remoteReply) return { kind: 'reply', envelope: remoteReply };
+        // Only the reply is persisted. Writing every fetched envelope into the
+        // log would mark them as already seen, and the daemon only notifies
+        // and auto-answers envelopes it appends itself — an ask directed at
+        // us that arrived while we were waiting would then be dropped silently.
+        const remoteEnvelopes = (await fetchRemote()).filter(
+          (e) => !options.acceptReplyFrom || options.acceptReplyFrom.includes(e.from.dev),
+        );
+        const remoteReply = findReplyToAsk(remoteEnvelopes, askId);
+        if (remoteReply) {
+          appendEnvelope(remoteReply, project);
+          return { kind: 'reply', envelope: remoteReply };
         }
       } catch {
         // Transient GitHub error: keep relying on the local log/daemon for this round.

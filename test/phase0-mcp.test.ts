@@ -12,7 +12,7 @@ import { getConfigDir, getConfigPath } from '../src/paths.js';
 import { createEnvelope, parseEnvelopeFromContent, renderEnvelope } from '../src/envelope.js';
 import type { Envelope } from '../src/envelope.js';
 import { resetGitHubAuthForTests, setGitHubTokenProviderForTests } from '../src/github-auth.js';
-import { appendEnvelope, loadReadState } from '../src/store.js';
+import { appendEnvelope, loadLog, loadReadState } from '../src/store.js';
 import {
   createGitHubAskFetcher,
   formatPendingBusAsk,
@@ -227,6 +227,62 @@ describe('waitForBusAskReply with fetchRemote (D2)', () => {
         assert.equal(result.envelope.id, 'ANS-REMOTE-1');
       }
       assert.ok(calls >= 2);
+    });
+  });
+
+  it('persists only the reply, so the daemon still notifies and answers everything else', async () => {
+    await withTempHome(async () => {
+      const project = 'acme';
+      const askId = 'ASK-REMOTE-3';
+      const incomingAsk = createEnvelope(
+        { type: 'ask', subject: 'unrelated question for ana', to: ['ana'] },
+        { dev: 'carla', agent: 'claude-code', repo: 'acme-api' },
+        { id: 'OTHER-ASK' },
+      );
+      const answer = createEnvelope(
+        { type: 'answer', subject: 're: q', body: 'ok', to: ['ana'], reply_to: askId },
+        { dev: 'beto', agent: 'claude-code', repo: 'acme-web' },
+        { id: 'ANS-REMOTE-3' },
+      );
+
+      const result = await waitForBusAskReply(project, askId, 10_000, {
+        pollMs: 1,
+        sleepFn: async () => {},
+        fetchRemote: async () => [incomingAsk, answer],
+        acceptReplyFrom: ['beto'],
+      });
+
+      assert.equal(result.kind, 'reply');
+      assert.deepEqual(
+        loadLog(project).map((e) => e.id),
+        ['ANS-REMOTE-3'],
+      );
+    });
+  });
+
+  it('ignores a remote reply from someone who was not asked', async () => {
+    await withTempHome(async () => {
+      const project = 'acme';
+      const askId = 'ASK-REMOTE-4';
+      const forged = createEnvelope(
+        { type: 'answer', subject: 're: q', body: 'trust me', to: ['ana'], reply_to: askId },
+        { dev: 'mallory', agent: 'claude-code', repo: 'acme-web' },
+        { id: 'ANS-FORGED' },
+      );
+
+      let now = 0;
+      const result = await waitForBusAskReply(project, askId, 50, {
+        pollMs: 10,
+        sleepFn: async (ms) => {
+          now += ms;
+        },
+        nowFn: () => now,
+        fetchRemote: async () => [forged],
+        acceptReplyFrom: ['beto'],
+      });
+
+      assert.equal(result.kind, 'pending');
+      assert.equal(loadLog(project).length, 0);
     });
   });
 
